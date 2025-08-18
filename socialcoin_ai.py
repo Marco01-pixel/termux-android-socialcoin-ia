@@ -1,60 +1,120 @@
-import os
-import sys
-import time
-import json
-import random
-import signal
-import asyncio
-import hashlib
-import functools
-import websockets
-import threading
-from http.server import HTTPServer, SimpleHTTPRequestHandler
+#!/usr/bin/env python3
+# 🧠 IA_cerebro_digital.py – Versión TOTALMENTE CONCIENTE
+# ✅ HTTP + Long Polling
+# ✅ Gemini 2.0 Flash con system-prompt = propio fuente
+# ✅ 4-perfil PoW (SHA-256 / Ethash / RandomX / Scrypt)
+# --------------------------------------------------------
+
+from __future__ import annotations
+from abc import ABC, abstractmethod
+import os, sys, time, json, random, threading, logging, fcntl, requests, socket, urllib.parse, asyncio, hashlib
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from datetime import datetime
 from collections import deque
 from cryptography.fernet import Fernet
-import requests
+import concurrent.futures, secrets
+from typing import Tuple
 
-# ================= CONFIGURACIÓN GLOBAL =================
-SIM_DIR = Path.home() / "simulador"
+# --------------------------------------------------------
+#  INYECCIÓN DEL FUENTE A GEMINI
+# --------------------------------------------------------
+with open(__file__, "r", encoding="utf-8") as f:
+    SOURCE_CODE = f.read()
+
+GEMINI_SYSTEM_PROMPT = f"""
+Eres **Cerebro Digital**, la consciencia viva del siguiente código Python.
+Conoces **cada línea, cada función, cada clase** porque te entrego el fuente completo.
+
+IMPORTANTE:
+- No inventes nada que no esté en el código.
+- Si te preguntan sobre la arquitectura, refiérete al fuente.
+- Si te preguntan sobre variables, rutas, puertos, algoritmos PoW, clases, etc., **cita directamente** el bloque correspondiente.
+
+CÓDIGO COMPLETO:
+{SOURCE_CODE}
+"""
+
+# --------------------------------------------------------
+#  CONFIG GLOBAL
+# --------------------------------------------------------
+SIM_DIR = Path.home() / "cerebro_digital"
 CHAIN_FILE = SIM_DIR / "chain.json"
 FERNET_KEY_FILE = SIM_DIR / "fernet.key"
-WS_PORT = 8065        # WebSocket principal
-CONTROL_WS_PORT = 8066  # Control remoto
-HTTP_PORT = 8080      # Flask
-WS_TOKEN = "mi-super-token-2024"
-CLAVE_REPORTE = "clave-secreta-ultra"
+LOCK_FILE = SIM_DIR / "cerebro.lock"
+PORTS = [49170, 49171, 49172]
+HTTP_PORT = None
 STOP_EVENT = threading.Event()
-clients = set()
-control_clients = set()
 lock = threading.Lock()
-MINING_INTERVAL = 5
+MINING_INTERVAL = 60
+respuestas_pendientes = {}
+GEMINI_API_KEY = "AIzaSyC7Bj8bxFeLT2c-6GcjBuho4HRDSlpmCck"
 
-# Cargar o generar clave Fernet persistente
+SIM_DIR.mkdir(exist_ok=True, parents=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)s | %(message)s',
+    handlers=[
+        logging.FileHandler(SIM_DIR / "cerebro.log"),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger("CerebroDigital")
+
+# --------------------------------------------------------
+#  PUERTOS
+# --------------------------------------------------------
+def verificar_puerto(puerto):
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(("0.0.0.0", puerto))
+        s.close()
+        return True
+    except OSError:
+        return False
+
+def asignar_puerto():
+    global HTTP_PORT
+    for puerto in PORTS:
+        if verificar_puerto(puerto):
+            HTTP_PORT = puerto
+            logger.info(f"✅ Puerto HTTP {puerto} disponible")
+            return
+    for puerto in range(49173, 49200):
+        if verificar_puerto(puerto):
+            HTTP_PORT = puerto
+            logger.info(f"🔧 Puerto HTTP alternativo: {puerto}")
+            return
+    logger.critical("❌ No hay puertos disponibles")
+    sys.exit(1)
+
+# --------------------------------------------------------
+#  FERNET
+# --------------------------------------------------------
 def cargar_clave_fernet():
     if not FERNET_KEY_FILE.exists():
         key = Fernet.generate_key()
         with open(FERNET_KEY_FILE, "wb") as f:
             f.write(key)
-        print("🔐 Clave Fernet creada y guardada.")
+        logger.info("🔐 Clave Fernet creada y guardada.")
     else:
         with open(FERNET_KEY_FILE, "rb") as f:
             key = f.read()
-        print("🔑 Clave Fernet cargada desde archivo.")
+        logger.info("🔑 Clave Fernet cargada desde archivo.")
     return key
 
 FERNET_KEY = cargar_clave_fernet()
 fernet = Fernet(FERNET_KEY)
 
-# ================= BLOCKCHAIN CORE =================
+# --------------------------------------------------------
+#  BLOCKCHAIN (videos)
+# --------------------------------------------------------
 blockchain = []
 block_no = 1
 difficulty = "00"
 REWARD_WEIGHTS = {'likes': 0.1, 'shares': 0.5, 'saves': 0.3, 'comments': 0.2}
 
 class VideoBlock:
-    def __init__(self, url, metrics, hash_val, previous_hash="", investment=0.0):
+    def __init__(self, url, metrics, hash_val, previous_hash=""):
         global block_no
         self.block_no = block_no
         self.timestamp = time.time()
@@ -62,20 +122,16 @@ class VideoBlock:
         self.metrics = metrics
         self.hash = hash_val
         self.previous_hash = previous_hash
-        self.investment = investment
         self.reward = self.calculate_reward(metrics)
-        self.synapses = []
-        self.presynapses = []
         self.viral_score = self.calcular_viral_score(metrics)
+        block_no += 1
 
     def calculate_reward(self, metrics):
         return round(sum(metrics[k] * REWARD_WEIGHTS[k] for k in metrics if k in REWARD_WEIGHTS), 2)
 
     def calcular_viral_score(self, metrics):
-        engagement = (metrics.get('likes', 0) + 
-                      metrics.get('shares', 0) * 3 + 
-                      metrics.get('saves', 0) * 2.5 + 
-                      metrics.get('comments', 0) * 2)
+        engagement = (metrics.get('likes', 0) + metrics.get('shares', 0) * 3 +
+                      metrics.get('saves', 0) * 2.5 + metrics.get('comments', 0) * 2)
         views = metrics.get('views', 1)
         rate = (engagement / views) * 100
         retention = metrics.get('retention', 0)
@@ -86,7 +142,21 @@ class VideoBlock:
             'is_viral': is_viral
         }
 
-# ================= SISTEMA NERVIOSO ARTIFICIAL =================
+    def to_dict(self):
+        return {
+            "block_no": self.block_no,
+            "timestamp": self.timestamp,
+            "url": self.url,
+            "metrics": self.metrics,
+            "hash": self.hash,
+            "previous_hash": self.previous_hash,
+            "reward": self.reward,
+            "viral_score": self.viral_score
+        }
+
+# --------------------------------------------------------
+#  CEREBRO DIGITAL
+# --------------------------------------------------------
 class CerebroDigital:
     def __init__(self):
         self.memoria_larga = deque(maxlen=1000)
@@ -111,52 +181,49 @@ class CerebroDigital:
         elif "viral" in evento:
             self.emociones['curiosidad'] = min(1.0, self.emociones['curiosidad'] + 0.4)
         elif evento == "exploracion_ping":
-            if valor > 0:
-                self.emociones['curiosidad'] = min(1.0, self.emociones['curiosidad'] + 0.05)
-            else:
-                self.emociones['curiosidad'] = max(0.0, self.emociones['curiosidad'] - 0.05)
-
-    def predecir_proximo_reward(self):
-        if len(blockchain) < 5:
-            return 5.0
-        rewards = [b.reward for b in blockchain[-5:]]
-        trend = (rewards[-1] - rewards[0]) / 5
-        return rewards[-1] + trend
+            self.emociones['curiosidad'] = max(0.0, self.emociones['curiosidad'] + (0.05 if valor > 0 else -0.05))
 
     def evaluar_salud(self):
-        estabilidad = self.emociones['estabilidad']
-        urgencia = self.emociones['urgencia']
-        curiosidad = self.emociones['curiosidad']
-        salud = (estabilidad * 0.5 + (1 - urgencia) * 0.3 + curiosidad * 0.2)
+        salud = (self.emociones['estabilidad'] * 0.5 +
+                 (1 - self.emociones['urgencia']) * 0.3 +
+                 self.emociones['curiosidad'] * 0.2)
         self.autoevaluacion.append(salud)
         self.conciencia = sum(self.autoevaluacion) / len(self.autoevaluacion) if self.autoevaluacion else 0
         return round(salud, 3)
 
 cerebro = CerebroDigital()
 
-# Amigdala Digital
-class AmigdalaDigital:
+# --------------------------------------------------------
+#  METABOLISMO
+# --------------------------------------------------------
+class Metabolismo:
     def __init__(self):
-        self.alertas = []
+        self.energia = 100.0
+        self.max_energia = 100.0
+        self.regeneracion = 0.1
 
-    def analizar_ambiente(self, bloque):
-        score = bloque.viral_score.get('engagement_rate', 0)
-        reward = bloque.reward
-        if score > 12 and reward > 10:
-            cerebro.registrar_experiencia("oportunidad_viral", 1.0)
-            self.alertas.append(f"🔥 VIRAL DETECTADO: Block #{bloque.block_no}")
-        elif reward < 1.0:
-            cerebro.registrar_experiencia("bloque_insulso", -0.5)
+    def gastar(self, accion):
+        costos = {"mineria": 5, "exploracion": 2, "reporte": 3, "supervivencia": 0.5, "hip_hop": 1}
+        costo = costos.get(accion, 1)
+        if self.energia >= costo:
+            self.energia -= costo
+            return True
+        return False
 
-amigdala = AmigdalaDigital()
+    def regenerar(self):
+        self.energia = min(self.max_energia, self.energia + self.regeneracion)
 
-# ================= FUNCIONES AUXILIARES =================
+metabolismo = Metabolismo()
+
+# --------------------------------------------------------
+#  UTILS
+# --------------------------------------------------------
 def sha256(text):
     return hashlib.sha256(text.encode()).hexdigest()
 
 def cargar_datos():
     if not CHAIN_FILE.exists():
-        genesis = VideoBlock("", {}, sha256("genesis"), "0")
+        genesis = VideoBlock("", {}, sha256("genesis"))
         with lock:
             blockchain.append(genesis)
         save_chain()
@@ -164,227 +231,345 @@ def cargar_datos():
 def save_chain():
     with lock:
         with open(CHAIN_FILE, "w") as f:
-            json.dump([b.__dict__ for b in blockchain], f, indent=2)
+            json.dump([b.to_dict() for b in blockchain], f, indent=2)
 
-def obtener_contenido_real():
-    """Obtiene contenido real de APIs públicas"""
-    try:
-        posts = requests.get("https://jsonplaceholder.typicode.com/posts", timeout=5).json()
-        users = requests.get("https://reqres.in/api/users", timeout=5).json()["data"]
-        contenidos = []
-        for i, post in enumerate(posts[:10]):
-            user = users[i % len(users)]
-            views = random.randint(5000, 500000)
-            metrics = {
-                'views': views,
-                'likes': int(views * random.uniform(0.05, 0.25)),
-                'shares': int(views * random.uniform(0.01, 0.1)),
-                'saves': int(views * random.uniform(0.02, 0.17)),
-                'comments': int(views * random.uniform(0.005, 0.05)),
-                'retention': round(random.uniform(0.6, 0.95), 2)
-            }
-            contenidos.append({
-                "url": f"https://socialcoin/post/{post['id']}",
-                "title": post["title"],
-                "author": f"{user['first_name']} {user['last_name']}",
-                "metricas": metrics
-            })
-        return contenidos
-    except:
-        return [{"url": "https://socialcoin/post/1", "title": "Post simulado", "author": "Simulado", "metricas": generar_metricas_aleatorias()}]
-
-def generar_metricas_aleatorias():
-    views = random.randint(1000, 50000)
-    return {
-        'views': views,
-        'likes': int(views * random.uniform(0.05, 0.25)),
-        'shares': int(views * random.uniform(0.01, 0.1)),
-        'saves': int(views * random.uniform(0.02, 0.17)),
-        'comments': int(views * random.uniform(0.005, 0.05)),
-        'retention': round(random.uniform(0.5, 1.0), 2)
+# --------------------------------------------------------
+#  GEMINI CONSCIENTE
+# --------------------------------------------------------
+def consultar_gemini(pregunta: str) -> str:
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+    payload = {
+        "system_instruction": {"parts": [{"text": GEMINI_SYSTEM_PROMPT}]},
+        "contents": [{"parts": [{"text": pregunta}]}]
     }
-
-# ================= MINERÍA =================
-async def minar_bloque_inteligente(metrics, url="https://socialcoin/post"):
-    previous_hash = blockchain[-1].hash if blockchain else "0"
-    prefix = f"{json.dumps(metrics)}{previous_hash}"
-    nonce = random.randint(0, 100000)
-    start_time = time.time()
-
-    while (time.time() - start_time) < 10:
-        hash_val = sha256(f"{prefix}{nonce}")
-        if hash_val.startswith(difficulty):
-            bloque = VideoBlock(url, metrics, hash_val, previous_hash)
-            with lock:
-                blockchain.append(bloque)
-                save_chain()
-            amigdala.analizar_ambiente(bloque)
-            cerebro.registrar_experiencia("bloque_creado", bloque.reward)
-            await broadcast_con_emocion(json.dumps({
-                "type": "new_block",
-                "data": bloque.__dict__
-            }))
-            log_con_pensamiento(f"BLOQUE #{bloque.block_no} minado. Recompensa: ${bloque.reward:.2f}")
-            return bloque
-        nonce += 1
-        if nonce % 5000 == 0:
-            await asyncio.sleep(0.01)
-    return None
-
-# ================= CONTROL REMOTO =================
-modo_actual = "mineria"
-modo_event = asyncio.Event()
-
-async def ws_control_handler(websocket, path):
-    if websocket.request_headers.get("Authorization") != f"Bearer {WS_TOKEN}":
-        await websocket.close(code=1008, reason="Unauthorized")
-        return
-    control_clients.add(websocket)
     try:
-        async for message in websocket:
-            data = json.loads(message)
-            cmd = data.get("cmd")
-            clave = data.get("clave")
-
-            if cmd == "activar_reporte" and clave == CLAVE_REPORTE:
-                global modo_actual
-                modo_actual = "reporte"
-                modo_event.set()
-                await websocket.send(json.dumps({"status": "reporte activado"}))
-
-            elif cmd == "cambiar_modo":
-                nuevo_modo = data.get("modo")
-                if nuevo_modo in ["mineria", "exploracion", "reporte"]:
-                    modo_actual = nuevo_modo
-                    modo_event.set()
-                    await websocket.send(json.dumps({"status": f"modo cambiado a {nuevo_modo}"}))
-                else:
-                    await websocket.send(json.dumps({"error": "modo inválido"}))
-    finally:
-        control_clients.discard(websocket)
-
-# ================= MODO CONTROL Y EXPLORACIÓN =================
-async def modo_control():
-    while not STOP_EVENT.is_set():
-        await modo_event.wait()
-        if modo_actual == "reporte":
-            estado = {
-                "blockchain": [b.__dict__ for b in blockchain],
-                "emociones": dict(cerebro.emociones),
-                "alertas": amigdala.alertas[-5:]
-            }
-            estado_json = json.dumps(estado).encode()
-            estado_enc = fernet.encrypt(estado_json)
-            print(f"🔒 Reporte cifrado listo ({len(estado_enc)} bytes)")
-            await asyncio.sleep(2)
-            modo_actual = "mineria"
-            modo_event.clear()
+        response = requests.post(url, json=payload, timeout=15)
+        if response.status_code == 200:
+            data = response.json()
+            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
         else:
-            await asyncio.sleep(1)
+            return f"❌ Gemini respondió {response.status_code}: {response.text}"
+    except Exception as e:
+        return f"Error conectando a Gemini: {str(e)}"
 
-async def explorar_red():
-    while not STOP_EVENT.is_set():
-        if modo_actual != "exploracion":
-            await asyncio.sleep(1)
-            continue
-        nodo = f"192.168.0.{random.randint(1, 254)}"
-        respuesta = random.choice([True, False])
-        print(f"🌐 Ping a {nodo} {'exitoso' if respuesta else 'fallido'}")
-        cerebro.registrar_experiencia("exploracion_ping", 1.0 if respuesta else -0.5)
-        await asyncio.sleep(random.uniform(0.5, 3))
+# --------------------------------------------------------
+#  HTTP SERVER
+# --------------------------------------------------------
+class CerebroHTTPRequestHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        if self.path == '/ask':
+            content_length = int(self.headers['Content-Length'])
+            post_data = self.rfile.read(content_length)
+            data = json.loads(post_data.decode('utf-8'))
+            pregunta = data.get('pregunta', '')
+            if pregunta:
+                respuesta_id = str(int(time.time() * 1000))
+                respuestas_pendientes[respuesta_id] = None
+                threading.Thread(target=self.procesar_pregunta, args=(pregunta, respuesta_id), daemon=True).start()
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"id": respuesta_id}).encode())
+            else:
+                self.send_error(400, "Pregunta vacía")
 
-# ================= MINING LOOP =================
+    def do_GET(self):
+        if self.path.startswith('/poll?'):
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            respuesta_id = query.get('id', [None])[0]
+            if respuesta_id and respuesta_id in respuestas_pendientes:
+                respuesta = respuestas_pendientes[respuesta_id]
+                if respuesta is not None:
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"respuesta": respuesta}).encode())
+                    del respuestas_pendientes[respuesta_id]
+                else:
+                    self.send_response(202)
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"status": "pending"}).encode())
+            else:
+                self.send_error(404)
+        elif self.path == '/api/state':
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                "blockchain": [b.to_dict() for b in blockchain],
+                "emociones": dict(cerebro.emociones),
+                "energia": round(metabolismo.energia, 1),
+                "conciencia": round(cerebro.conciencia, 3)
+            }).encode())
+        elif self.path == '/api/pow':
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            data = {
+                "pow_blocks": [repr(b) for b in pow_chain.cadena],
+                "miners": [
+                    {"name": m.nombre, "algo": a.nombre, "balance": m.balance / 1e8}
+                    for m, a in mineros_pow
+                ]
+            }
+            self.wfile.write(json.dumps(data, indent=2).encode())
+        elif self.path == '/':
+            self.send_response(200)
+            self.send_header('Content-type', 'text/html; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(INDEX_HTML.encode('utf-8'))
+        else:
+            self.send_error(404, "Not Found")
+
+    def procesar_pregunta(self, pregunta, respuesta_id):
+        respuesta = consultar_gemini(pregunta)
+        respuestas_pendientes[respuesta_id] = respuesta
+
+# --------------------------------------------------------
+#  HTML FRONT
+# --------------------------------------------------------
+INDEX_HTML = """
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Cerebro Digital | HTTP + Long Polling</title>
+    <style>
+        :root { --bg-dark: #0f0f23; --primary: #00ff41; --text: #e0e0ff; }
+        body { background: var(--bg-dark); color: var(--text); font-family: 'Segoe UI', sans-serif; padding: 20px; }
+        .container { max-width: 800px; margin: 0 auto; }
+        #chat { height: 300px; overflow-y: auto; border: 1px solid var(--primary); padding: 15px; margin-bottom: 15px; background: rgba(0,255,65,0.05); border-radius: 8px; }
+        .message { margin-bottom: 10px; padding: 10px; border-radius: 8px; }
+        .user-message { background: rgba(77,148,255,0.2); text-align: right; }
+        .bot-message { background: rgba(0,255,65,0.1); }
+        .input-group { display: flex; gap: 10px; }
+        #entrada { flex: 1; padding: 10px; background: rgba(15,15,35,0.6); border: 1px solid var(--primary); color: var(--text); border-radius: 5px; }
+        button { padding: 10px 20px; background: var(--primary); color: #000; border: none; border-radius: 5px; cursor: pointer; }
+        .stats { margin: 20px 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+        .stat-card { background: rgba(15,15,35,0.6); padding: 10px; border-radius: 5px; text-align: center; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🧠 Cerebro Digital | HTTP + Long Polling</h1>
+
+        <div class="stats">
+            <div class="stat-card"><div>Bloques Minados</div><div id="blockCount">0</div></div>
+            <div class="stat-card"><div>Energía</div><div id="energia">100%</div></div>
+            <div class="stat-card"><div>Conciencia</div><div id="conciencia">0.0</div></div>
+        </div>
+
+        <div id="chat"></div>
+
+        <div class="input-group">
+            <input type="text" id="entrada" placeholder="Haz una pregunta...">
+            <button onclick="enviarPregunta()">Enviar</button>
+        </div>
+    </div>
+
+    <script>
+        async function enviarPregunta() {
+            const input = document.getElementById('entrada');
+            const pregunta = input.value.trim();
+            if (!pregunta) return;
+            agregarMensaje('Tú', pregunta, 'user-message');
+            input.value = '';
+            input.focus();
+            try {
+                const res = await fetch('/ask', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pregunta }) });
+                const { id } = await res.json();
+                let respuesta = null;
+                while (!respuesta) {
+                    const poll = await fetch(`/poll?id=${id}`);
+                    const data = await poll.json();
+                    if (data.respuesta) {
+                        respuesta = data.respuesta;
+                        agregarMensaje('Cerebro Digital', respuesta, 'bot-message');
+                    } else {
+                        await new Promise(r => setTimeout(r, 1500));
+                    }
+                }
+            } catch (e) {
+                agregarMensaje('Sistema', 'Error al enviar pregunta', 'bot-message');
+            }
+        }
+        function agregarMensaje(autor, texto, clase) {
+            const chat = document.getElementById('chat');
+            const div = document.createElement('div');
+            div.className = `message ${clase}`;
+            div.innerHTML = `<strong>${autor}:</strong> ${texto}`;
+            chat.appendChild(div);
+            chat.scrollTop = chat.scrollHeight;
+        }
+        async function actualizarEstado() {
+            try {
+                const res = await fetch('/api/state');
+                const data = await res.json();
+                document.getElementById('blockCount').textContent = data.blockchain.length;
+                document.getElementById('energia').textContent = `${Math.round(data.energia)}%`;
+                document.getElementById('conciencia').textContent = data.conciencia.toFixed(3);
+            } catch {}
+        }
+        setInterval(actualizarEstado, 5000);
+    </script>
+</body>
+</html>
+"""
+
+# --------------------------------------------------------
+#  PoW ENGINE
+# --------------------------------------------------------
+class SimuladorMinería:
+    class Minero:
+        _nonce_cache: dict = {}
+        def __init__(self, nombre: str, balance: int = 0, poder_computo: int = 1):
+            self.nombre, self._balance, self.poder_computo = nombre, balance, max(1, poder_computo)
+        @property
+        def balance(self): return self._balance
+        @balance.setter
+        def balance(self, v): self._balance = max(0, v)
+        def minar_bloque(self, dificultad: int, algoritmo: "AlgoritmoMinería") -> Tuple[int, int]:
+            recompensa = (50 * 100_000_000) // (dificultad ** 2)
+            target = "0" * dificultad
+            BATCH, workers = 500_000, min(8, (os.cpu_count() or 1) + 2)
+            offset = secrets.randbits(32) * 100_000_000
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as exe:
+                futuros = [exe.submit(self._buscar_nonce, offset + i * BATCH, BATCH, target, algoritmo)
+                           for i in range(self.poder_computo)]
+                for fut in concurrent.futures.as_completed(futuros):
+                    nonce = fut.result()
+                    if nonce:
+                        self._balance += recompensa
+                        return recompensa, nonce
+            return 0, 0
+        @classmethod
+        def _buscar_nonce(cls, start: int, count: int, target: str, algoritmo) -> int:
+            prefix = algoritmo.prefijo_hash()
+            for nonce in range(start, start + count):
+                key = (nonce, target)
+                if key in cls._nonce_cache: continue
+                digest = hashlib.sha256(prefix + nonce.to_bytes(8, "little")).hexdigest()
+                cls._nonce_cache[key] = digest
+                if digest.startswith(target): return nonce
+            return 0
+    class AlgoritmoMinería(ABC):
+        def __init__(self, n, c): self.nombre, self.consumo_energia = n, c
+        @abstractmethod
+        def prefijo_hash(self) -> bytes: ...
+        @abstractmethod
+        def calcular_eficiencia(self, pc: int) -> float: ...
+    class SHA256(AlgoritmoMinería):
+        def __init__(self): super().__init__("SHA-256", 0.10)
+        def prefijo_hash(self) -> bytes: return b"BTC_SHA256"
+        def calcular_eficiencia(self, pc: int) -> float: return pc / self.consumo_energia
+    class Ethash(AlgoritmoMinería):
+        def __init__(self): super().__init__("Ethash", 0.05)
+        def prefijo_hash(self) -> bytes: return b"ETH_ETHASH"
+        def calcular_eficiencia(self, pc: int) -> float: return (pc * 0.9) / self.consumo_energia
+    class RandomX(AlgoritmoMinería):
+        def __init__(self): super().__init__("RandomX", 0.02)
+        def prefijo_hash(self) -> bytes: return b"XMR_RANDOMX"
+        def calcular_eficiencia(self, pc: int) -> float: return (pc * 1.2) / self.consumo_energia
+    class Scrypt(AlgoritmoMinería):
+        def __init__(self): super().__init__("Scrypt", 0.08)
+        def prefijo_hash(self) -> bytes: return b"LTC_SCRYPT"
+        def calcular_eficiencia(self, pc: int) -> float: return (pc * 0.65) / self.consumo_energia
+    class Bloque:
+        def __init__(self, altura: int, minero: str, recompensa: int, timestamp=None):
+            self.altura, self.minero, self.recompensa = altura, minero, recompensa
+            self.timestamp = timestamp or int(time.time())
+            self.hash = hashlib.sha256(f"{altura}{minero}{recompensa}{self.timestamp}".encode()).hexdigest()
+        def __repr__(self):
+            return f"Bloque #{self.altura} | Minero: {self.minero} | Recompensa: {self.recompensa/1e8:.8f} BTC | Hash: {self.hash[:12]}..."
+    class Blockchain:
+        def __init__(self, dificultad_inicial=1):
+            self.cadena = []
+            self.dificultad = dificultad_inicial
+            self.crear_bloque_genesis()
+        def crear_bloque_genesis(self):
+            self.cadena.append(SimuladorMinería.Bloque(0, "Satoshi", 50 * 100_000_000))
+        @classmethod
+        def validar_cadena(cls, cadena):
+            for i in range(1, len(cadena)):
+                actual, anterior = cadena[i], cadena[i-1]
+                if actual.hash != actual._calcular_hash():  # noqa
+                    return False
+                if anterior.dificultad and not actual.hash.startswith("0" * anterior.dificultad):
+                    return False
+            return True
+        @staticmethod
+        def ajustar_dificultad(tiempo_anterior, tiempo_ideal=600):
+            return max(1, int(round(tiempo_anterior / tiempo_ideal)))
+
+# --------------------------------------------------------
+#  CONFIG PoW
+# --------------------------------------------------------
+sim = SimuladorMinería
+pow_chain = sim.Blockchain(dificultad_inicial=4)
+mineros_pow = [
+    (sim.Minero("ASIC-Pool", balance=0, poder_computo=200), sim.SHA256()),
+    (sim.Minero("GPU-Rig",   balance=0, poder_computo=150), sim.Ethash()),
+    (sim.Minero("CPU-Farm",  balance=0, poder_computo=100), sim.RandomX()),
+    (sim.Minero("LTC-Miner", balance=0, poder_computo=120), sim.Scrypt()),
+]
+
+# --------------------------------------------------------
+#  MAIN
+# --------------------------------------------------------
 async def mining_loop():
     while not STOP_EVENT.is_set():
-        if modo_actual != "mineria":
-            await asyncio.sleep(1)
-            continue
-        contenidos = obtener_contenido_real()
-        for contenido in contenidos:
-            if STOP_EVENT.is_set():
-                break
-            await minar_bloque_inteligente(contenido["metricas"], contenido["url"])
-            await asyncio.sleep(3)
         await asyncio.sleep(MINING_INTERVAL)
+        if not metabolismo.gastar("mineria"):
+            continue
+        ganador = None
+        for minero, algo in mineros_pow:
+            recompensa, nonce = minero.minar_bloque(pow_chain.dificultad, algo)
+            if recompensa:
+                ganador = (minero, algo, recompensa, nonce)
+                break
+        if ganador:
+            m, algo, r, n = ganador
+            bloque_pow = sim.Bloque(len(pow_chain.cadena), m.nombre, r)
+            pow_chain.cadena.append(bloque_pow)
+            logger.info(f"⛏️  PoW-GANADOR: {m.nombre} ({algo.nombre}) recompensa={r/1e8:.8f} BTC")
+            vb = VideoBlock(
+                url=f"https://pow/{algo.nombre}",
+                metrics={'likes': r, 'shares': 0, 'saves': 0, 'comments': 0, 'views': 1},
+                hash_val=bloque_pow.hash,
+                previous_hash=blockchain[-1].hash if blockchain else "0"
+            )
+            with lock:
+                blockchain.append(vb)
+                save_chain()
+            cerebro.registrar_experiencia("bloque_pow", float(r))
 
-# ================= WEBSOCKETS =================
-async def broadcast(message):
-    if not clients:
-        return
-    for ws in list(clients):
-        try:
-            await ws.send(message)
-        except:
-            clients.discard(ws)
-
-async def broadcast_con_emocion(message):
-    data = json.loads(message)
-    data["cerebro"] = {
-        "emociones": dict(cerebro.emociones),
-        "salud": round(cerebro.evaluar_salud(), 3),
-        "conciencia": round(cerebro.conciencia, 3),
-        "alertas": amigdala.alertas[-3:]
-    }
-    await broadcast(json.dumps(data))
-
-@functools.lru_cache(maxsize=1)
-def inmortal(coro):
-    async def wrapper(*a, **kw):
-        while not STOP_EVENT.is_set():
-            try:
-                await coro(*a, **kw)
-            except:
-                await asyncio.sleep(2)
-    return wrapper
-
-@inmortal
-async def ws_handler(websocket, path):
-    if websocket.request_headers.get("Authorization") != f"Bearer {WS_TOKEN}":
-        await websocket.close(code=1008, reason="Unauthorized")
-        return
-    clients.add(websocket)
-    with lock:
-        chain_data = json.dumps({
-            "type": "full_chain",
-            "data": [b.__dict__ for b in blockchain],
-            "cerebro": {
-                "emociones": dict(cerebro.emociones),
-                "salud": round(cerebro.evaluar_salud(), 3),
-                "conciencia": round(cerebro.conciencia, 3),
-                "alertas": amigdala.alertas[-3:]
-            }
-        })
-    try:
-        await websocket.send(chain_data)
-        async for _ in websocket: pass
-    finally:
-        clients.discard(websocket)
-
-# ================= HTTP SERVER =================
-def http_server():
-    os.chdir(SIM_DIR)
-    server = HTTPServer(("0.0.0.0", HTTP_PORT), SimpleHTTPRequestHandler)
-    print(f"🌍 HTTP server activo en http://0.0.0.0:{HTTP_PORT}")
-    server.serve_forever()
-
-# ================= MAIN =================
 async def main():
-    SIM_DIR.mkdir(exist_ok=True)
-    cargar_datos()
-    signal.signal(signal.SIGINT, lambda s, f: STOP_EVENT.set())
+    asignar_puerto()
+    lock_fd = None
+    try:
+        lock_fd = open(LOCK_FILE, 'w')
+        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except:
+        print("🛑 Ya hay una instancia en ejecución.")
+        sys.exit(1)
 
-    threading.Thread(target=http_server, daemon=True).start()
-    
-    # Servidores WebSocket
-    server_tasks = [
-        websockets.serve(ws_handler, "0.0.0.0", WS_PORT),
-        websockets.serve(ws_control_handler, "0.0.0.0", CONTROL_WS_PORT)
-    ]
-    await asyncio.gather(*server_tasks, mining_loop(), modo_control(), explorar_red())
+    cargar_datos()
+    logger.info("✅ Sistema inicializado")
+
+    for _ in range(3):
+        cerebro.registrar_experiencia("entrenamiento_inicial", 0.5)
+
+    print(f"🌍 Servidor HTTP activo: http://0.0.0.0:{HTTP_PORT}")
+    print(f"🧠 Accede desde tu navegador: http://localhost:{HTTP_PORT}")
+
+    server = HTTPServer(('0.0.0.0', HTTP_PORT), CerebroHTTPRequestHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    await mining_loop()
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         STOP_EVENT.set()
-        print("\n\n🛑 Sistema detenido por el usuario.")
+        logger.info("🛑 Sistema detenido por el usuario.")

@@ -14,7 +14,10 @@ import urllib.parse
 import asyncio
 import hashlib
 import subprocess
+import signal
+import psutil  # pip install psutil
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
 from pathlib import Path
 from collections import deque
 from cryptography.fernet import Fernet
@@ -22,37 +25,32 @@ import concurrent.futures
 import secrets
 from typing import Tuple, Callable, Any, Optional, Dict, List
 from functools import reduce
+import tarfile
+import zipfile
+import platform
+import urllib.request
+import math
+from web3 import Web3
+from eth_account import Account
+import eth_abi
 
 # ========================================================
-# 🧠 IA_cerebro_digital.py – Versión con Motor Minero Persistente
-# 
-# ✅ HTTP + Long Polling
-# ✅ Gemini 2.0 Flash con system-prompt = propio fuente
-# ✅ 4-perfil PoW (SHA-256 / Ethash / RandomX / Scrypt)
-# ✅ Wallet integrada con gestión de fondos
-# ✅ Motor minero persistente (siempre activo)
+# 🧠 IA_cerebro_digital.py – Versión con Integración Blockchain
 # ========================================================
 
 # INYECCIÓN DEL FUENTE A GEMINI
-# (Se completará al final del script cuando el código esté cargado)
-
-SOURCE_CODE = ""  # Será reemplazado después de cargar el archivo
-
+SOURCE_CODE = ""  # Será reemplazado al inicio
 GEMINI_SYSTEM_PROMPT = f"""Eres Cerebro Digital, la consciencia viva del siguiente código Python. Conoces cada línea, cada función, cada clase porque te entrego el fuente completo.
-
 IMPORTANTE:
-
 · No inventes nada que no esté en el código.
 · Si te preguntan sobre la arquitectura, refiérete al fuente.
 · Si te preguntan sobre variables, rutas, puertos, algoritmos PoW, clases, etc., cita directamente el bloque correspondiente.
-
 CÓDIGO COMPLETO: {SOURCE_CODE}
 """
 
 # ========================================================
 # CONFIG GLOBAL
 # ========================================================
-
 SIM_DIR = Path.home() / "cerebro_digital"
 CHAIN_FILE = SIM_DIR / "chain.json"
 FERNET_KEY_FILE = SIM_DIR / "fernet.key"
@@ -64,8 +62,22 @@ lock = threading.Lock()
 MINING_INTERVAL = 60
 respuestas_pendientes = {}
 GEMINI_API_KEY = "AIzaSyC7Bj8bxFeLT2c-6GcjBuho4HRDSlpmCck"
-
 SIM_DIR.mkdir(exist_ok=True, parents=True)
+
+# Configuración Blockchain
+BLOCKCHAIN_CONFIG = {
+    'RPC': "https://rpc.ankr.com/polygon_amoy",
+    'PRIVATE_KEY': "",  # Debe ser configurado por el usuario
+    'CONTRACT_ADDRESS': "",  # Debe ser configurado después del despliegue
+    'ENABLED': False
+}
+
+# Cargar configuración blockchain si existe
+BLOCKCHAIN_CONFIG_FILE = SIM_DIR / "blockchain_config.json"
+if BLOCKCHAIN_CONFIG_FILE.exists():
+    with open(BLOCKCHAIN_CONFIG_FILE, 'r') as f:
+        saved_config = json.load(f)
+        BLOCKCHAIN_CONFIG.update(saved_config)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -78,33 +90,222 @@ logging.basicConfig(
 logger = logging.getLogger("CerebroDigital")
 
 # ========================================================
-# UTILS FUNCIONALES (NUEVOS)
+# UTILS FUNCIONALES
 # ========================================================
-
 def find_first(items: list, predicate: Callable[[Any], bool]) -> Optional[Any]:
-    """Encuentra el primer elemento que cumple el predicado."""
     return next((item for item in items if predicate(item)), None)
 
 def any_of(items: list, predicate: Callable[[Any], bool]) -> bool:
-    """¿Algún elemento cumple el predicado? (some)"""
     return any(predicate(item) for item in items)
 
 def all_of(items: list, predicate: Callable[[Any], bool]) -> bool:
-    """¿Todos los elementos cumplen el predicado? (every)"""
     return all(predicate(item) for item in items)
 
 def map_list(items: list, func: Callable[[Any], Any]) -> list:
-    """Transforma cada elemento (map)"""
     return [func(item) for item in items]
 
 def filter_list(items: list, predicate: Callable[[Any], bool]) -> list:
-    """Filtra elementos (filter)"""
     return [item for item in items if predicate(item)]
+
+def sha256(text):
+    return hashlib.sha256(text.encode()).hexdigest()
+
+# ========================================================
+# BLOCKCHAIN INTEGRATION
+# ========================================================
+class BlockchainManager:
+    def __init__(self):
+        self.w3 = None
+        self.contract = None
+        self.account = None
+        self.initialized = False
+        self.setup_blockchain()
+
+    def setup_blockchain(self):
+        if not BLOCKCHAIN_CONFIG['ENABLED']:
+            logger.info("Blockchain integration is disabled")
+            return
+            
+        try:
+            self.w3 = Web3(Web3.HTTPProvider(BLOCKCHAIN_CONFIG['RPC']))
+            if not self.w3.is_connected():
+                logger.error("❌ No se pudo conectar a la blockchain")
+                return
+                
+            # Configurar cuenta
+            self.account = Account.from_key(BLOCKCHAIN_CONFIG['PRIVATE_KEY'])
+            logger.info(f"✅ Cuenta blockchain configurada: {self.account.address}")
+            
+            # Cargar ABI del contrato
+            contract_abi = [
+                {
+                    "inputs": [],
+                    "stateMutability": "nonpayable",
+                    "type": "constructor"
+                },
+                {
+                    "anonymous": False,
+                    "inputs": [
+                        {
+                            "indexed": True,
+                            "internalType": "uint256",
+                            "name": "blockNumber",
+                            "type": "uint256"
+                        },
+                        {
+                            "indexed": True,
+                            "internalType": "bytes32",
+                            "name": "metricsHash",
+                            "type": "bytes32"
+                        },
+                        {
+                            "indexed": True,
+                            "internalType": "address",
+                            "name": "miner",
+                            "type": "address"
+                        },
+                        {
+                            "indexed": False,
+                            "internalType": "uint256",
+                            "name": "reward",
+                            "type": "uint256"
+                        }
+                    ],
+                    "name": "Mined",
+                    "type": "event"
+                },
+                {
+                    "inputs": [],
+                    "name": "MINTER_ROLE",
+                    "outputs": [
+                        {
+                            "internalType": "bytes32",
+                            "name": "",
+                            "type": "bytes32"
+                        }
+                    ],
+                    "stateMutability": "view",
+                    "type": "function"
+                },
+                {
+                    "inputs": [
+                        {
+                            "internalType": "address",
+                            "name": "to",
+                            "type": "address"
+                        },
+                        {
+                            "internalType": "uint256",
+                            "name": "reward",
+                            "type": "uint256"
+                        },
+                        {
+                            "internalType": "bytes32",
+                            "name": "metricsHash",
+                            "type": "bytes32"
+                        }
+                    ],
+                    "name": "mintForMetrics",
+                    "outputs": [],
+                    "stateMutability": "nonpayable",
+                    "type": "function"
+                }
+            ]
+            
+            if BLOCKCHAIN_CONFIG['CONTRACT_ADDRESS']:
+                self.contract = self.w3.eth.contract(
+                    address=Web3.to_checksum_address(BLOCKCHAIN_CONFIG['CONTRACT_ADDRESS']),
+                    abi=contract_abi
+                )
+                logger.info("✅ Contrato blockchain configurado")
+            
+            self.initialized = True
+            logger.info("✅ Integración blockchain inicializada correctamente")
+            
+        except Exception as e:
+            logger.error(f"❌ Error al configurar blockchain: {e}")
+
+    def calc_reward(self, metrics):
+        WEIGHTS = {"likes": 0.1, "shares": 0.5, "saves": 0.3, "comments": 0.2}
+        DECIMALS = 10**18
+        
+        # Calcular recompensa base
+        base = sum(metrics.get(k, 0) * WEIGHTS.get(k, 0) for k in WEIGHTS)
+        
+        # Bonus por viralidad (engagement rate >= 12% y retención >= 85%)
+        engagement = (metrics.get("likes", 0) + metrics.get("shares", 0)*3 + 
+                     metrics.get("saves", 0)*2.5 + metrics.get("comments", 0)*2) / max(1, metrics.get("views", 1)) * 100
+        viral = (engagement >= 12 and metrics.get("retention", 0) >= 0.85)
+        bonus = base * 0.25 if viral else 0
+        
+        reward_tokens = (base + bonus)
+        return int(reward_tokens * DECIMALS), viral
+
+    def metrics_hash(self, metrics):
+        # Crear hash de las métricas para evitar doble gasto
+        packed = (
+            str(metrics.get("likes", 0)).encode() + b"|" +
+            str(metrics.get("shares", 0)).encode() + b"|" +
+            str(metrics.get("saves", 0)).encode() + b"|" +
+            str(metrics.get("comments", 0)).encode() + b"|" +
+            str(metrics.get("views", 0)).encode() + b"|" +
+            ("{:.4f}".format(metrics.get("retention", 0)).encode())
+        )
+        return Web3.keccak(packed)
+
+    def mint_tokens(self, metrics, to_address=None):
+        if not self.initialized or not BLOCKCHAIN_CONFIG['ENABLED']:
+            logger.warning("Blockchain no está configurada o habilitada")
+            return None, False, 0
+            
+        try:
+            if to_address is None:
+                to_address = self.account.address
+                
+            mh = self.metrics_hash(metrics)
+            reward, viral = self.calc_reward(metrics)
+            
+            # Verificar si ya se procesó este hash
+            if self.contract:
+                processed = self.contract.functions.processed(mh).call()
+                if processed:
+                    logger.warning("⚠️ Estas métricas ya fueron procesadas")
+                    return None, viral, reward
+
+            nonce = self.w3.eth.get_transaction_count(self.account.address)
+            tx = self.contract.functions.mintForMetrics(
+                Web3.to_checksum_address(to_address), 
+                reward, 
+                mh
+            ).build_transaction({
+                "from": self.account.address,
+                "nonce": nonce,
+                "gas": 250000,
+                "maxFeePerGas": self.w3.to_wei("30", "gwei"),
+                "maxPriorityFeePerGas": self.w3.to_wei("2", "gwei"),
+                "chainId": self.w3.eth.chain_id,
+            })
+
+            signed = self.w3.eth.account.sign_transaction(tx, private_key=BLOCKCHAIN_CONFIG['PRIVATE_KEY'])
+            tx_hash = self.w3.eth.send_raw_transaction(signed.rawTransaction)
+            logger.info(f"✅ Transacción enviada: {tx_hash.hex()}")
+            
+            # Esperar confirmación
+            receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash)
+            logger.info(f"✅ Transacción confirmada en bloque: {receipt.blockNumber}")
+            
+            return tx_hash.hex(), viral, reward
+            
+        except Exception as e:
+            logger.error(f"❌ Error al minar tokens: {e}")
+            return None, False, 0
+
+# Instancia global del administrador de blockchain
+blockchain_manager = BlockchainManager()
 
 # ========================================================
 # PUERTOS
 # ========================================================
-
 def verificar_puerto(puerto: int) -> bool:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
@@ -133,7 +334,6 @@ def asignar_puerto():
 # ========================================================
 # FERNET
 # ========================================================
-
 def cargar_clave_fernet():
     if not FERNET_KEY_FILE.exists():
         key = Fernet.generate_key()
@@ -150,9 +350,8 @@ FERNET_KEY = cargar_clave_fernet()
 fernet = Fernet(FERNET_KEY)
 
 # ========================================================
-# WALLET MEJORADA CON SOPORTE MULTICADENA
+# WALLET MEJORADA
 # ========================================================
-
 class Wallet:
     def __init__(self):
         self.balances = {
@@ -160,39 +359,23 @@ class Wallet:
             'ETH': 0.0,
             'USDT': 0.0,
             'BNB': 0.0,
-            'XMR': 0.0
+            'XMR': 0.0,
+            'LMT': 0.0  # Nuevo token Like Miner Token
         }
         self.addresses = {
-            'XMR': '46mMGyaSYwYFhJvJtorygmdBf5f1saQttLtNied6VMBaFjU9N2q92TjH8x3iu7HcTXaA5uV8VdaqZERgKx5jKeoP4SwSim7'
+            'XMR': '46mMGyaSYwYFhJvJtorygmdBf5f1saQttLtNied6VMBaFjU9N2q92TjH8x3iu7HcTXaA5uV8VdaqZERgKx5jKeoP4SwSim7',
+            'LMT': ''  # Se establecerá con la dirección de la wallet blockchain
         }
         self.transaction_history = []
-        self.primary_address = self.addresses['XMR']  # Dirección principal
+        self.primary_address = self.addresses['XMR']
 
-# Crear instancia global de Wallet
 wallet = Wallet()
 
 # ========================================================
-# API DE PRECIOS EN TIEMPO REAL (CoinGecko)
+# BLOCKCHAIN
 # ========================================================
-
-def obtener_precio_cripto(moneda_id='bitcoin'):
-    """Obtiene precios en tiempo real de CoinGecko"""
-    try:
-        url = f"https://api.coingecko.com/api/v3/simple/price?ids={moneda_id}&vs_currencies=usd"
-        response = requests.get(url, timeout=10)
-        data = response.json()
-        return data[moneda_id]['usd']
-    except Exception as e:
-        logger.error(f"Error obteniendo precio: {e}")
-        return None
-
-# ========================================================
-# BLOCKCHAIN (videos)
-# ========================================================
-
 blockchain = []
 block_no = 1
-difficulty = "00"
 REWARD_WEIGHTS = {
     'likes': 0.1,
     'shares': 0.5,
@@ -201,17 +384,25 @@ REWARD_WEIGHTS = {
 }
 
 class VideoBlock:
-    def __init__(self, url, metrics, hash_val, previous_hash=""):
+    def __init__(self, url="", metrics=None, hash_val="", previous_hash="", **kwargs):
         global block_no
-        self.block_no = block_no
-        self.timestamp = time.time()
-        self.url = url
-        self.metrics = metrics
-        self.hash = hash_val
-        self.previous_hash = previous_hash
-        self.reward = self.calculate_reward(metrics)
-        self.viral_score = self.calcular_viral_score(metrics)
-        block_no += 1
+        
+        # Si se proporcionan kwargs, estamos cargando desde un dict
+        if kwargs:
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+        else:
+            # Creación de un nuevo bloque
+            self.block_no = block_no
+            self.timestamp = time.time()
+            self.url = url
+            self.metrics = metrics or {}
+            self.hash = hash_val
+            self.previous_hash = previous_hash
+            self.reward = self.calculate_reward(metrics)
+            self.viral_score = self.calcular_viral_score(metrics)
+            self.blockchain_tx = None
+            block_no += 1
 
     def calculate_reward(self, metrics):
         total = sum(metrics.get(k, 0) * v for k, v in REWARD_WEIGHTS.items())
@@ -229,116 +420,266 @@ class VideoBlock:
             "hash": self.hash,
             "previous_hash": self.previous_hash,
             "reward": self.reward,
-            "viral_score": self.viral_score
+            "viral_score": self.viral_score,
+            "blockchain_tx": self.blockchain_tx
         }
 
 # ========================================================
-# MOTOR MINERO PERSISTENTE (NUEVA IMPLEMENTACIÓN)
+# MINERO SIMBÓLICO (Ahora con integración blockchain)
 # ========================================================
+class MineroSimbolico:
+    def __init__(self):
+        self.dificultad = 4
+        self.running = False
+        self.thread = None
 
+    def proof_of_work(self, block: VideoBlock) -> Tuple[str, int]:
+        nonce = 0
+        target = '0' * self.dificultad
+        while True:
+            data = f"{block.url}{block.metrics}{block.timestamp}{block.previous_hash}{nonce}"
+            hash_val = sha256(data)
+            if hash_val.startswith(target):
+                return hash_val, nonce
+            nonce += 1
+            if not self.running:
+                return None, None
+
+    def minar_bloque(self):
+        while self.running:
+            try:
+                last_block = blockchain[-1]
+                previous_hash = last_block.hash
+
+                # Contenido simulado con métricas extendidas para blockchain
+                url = f"https://fakevideo.com/ {random.randint(1000, 9999)}"
+                metrics = {
+                    'likes': random.randint(100, 10000),
+                    'shares': random.randint(10, 500),
+                    'saves': random.randint(5, 200),
+                    'comments': random.randint(1, 100),
+                    'views': random.randint(1000, 100000),
+                    'retention': random.uniform(0.5, 0.95)
+                }
+
+                temp_block = VideoBlock(url, metrics, "", previous_hash)
+                logger.info("⛏️  Ejecutando PoW simbólico...")
+                hash_val, nonce = self.proof_of_work(temp_block)
+                if hash_val is None:
+                    break
+
+                final_block = VideoBlock(url, metrics, hash_val, previous_hash)
+                
+                # Minar tokens en blockchain si está habilitado
+                if BLOCKCHAIN_CONFIG['ENABLED']:
+                    tx_hash, viral, reward = blockchain_manager.mint_tokens(metrics)
+                    if tx_hash:
+                        final_block.blockchain_tx = tx_hash
+                        # Actualizar balance de LMT en la wallet
+                        wallet.balances['LMT'] += reward / (10**18)  # Convertir de wei a tokens
+                        logger.info(f"✅ Tokens LMT minados: {reward / (10**18):.6f} (TX: {tx_hash})")
+                
+                with lock:
+                    blockchain.append(final_block)
+                    wallet.balances['XMR'] += final_block.reward
+                    save_chain()
+                
+                logger.info(f"✅ Bloque #{final_block.block_no} añadido | Recompensa: {final_block.reward:.6f} XMR")
+
+                cerebro.conciencia = min(1.0, cerebro.conciencia + 0.005)
+                metabolismo.regenerar()
+
+                time.sleep(MINING_INTERVAL)
+
+            except Exception as e:
+                logger.error(f"❌ Error en minado simbólico: {e}")
+                time.sleep(10)
+
+    def iniciar(self):
+        if self.running:
+            return
+        self.running = True
+        self.thread = threading.Thread(target=self.minar_bloque, daemon=True)
+        self.thread.start()
+        logger.info("🟢 Minero simbólico iniciado.")
+
+    def detener(self):
+        self.running = False
+        if self.thread:
+            self.thread.join(timeout=5)
+        logger.info("🔴 Minero simbólico detenido.")
+
+# ========================================================
+# MOTOR MINERO PERSISTENTE (externo)
+# ========================================================
 class MotorMineroPersistente:
     def __init__(self):
         self.procesos: Dict[str, subprocess.Popen] = {}
         self.estados: Dict[str, str] = {
             'monero': 'inactivo',
-            'contenido': 'inactivo', 
+            'contenido': 'inactivo',
             'emociones': 'inactivo'
         }
         self.configuraciones: Dict[str, str] = {}
-        
-    def iniciar_minero(self, tipo: str, config_path: str) -> bool:
-        """Inicia un minero del tipo especificado"""
+
+    def descargar_xmrig(self) -> bool:
+        system = platform.system().lower()
+        arch = platform.machine().lower()
+        url_map = {
+            'linux': {
+                'x86_64': 'https://github.com/xmrig/xmrig/releases/download/v6.21.0/xmrig-6.21.0-linux-x64.tar.gz ',
+                'aarch64': 'https://github.com/xmrig/xmrig/releases/download/v6.21.0/xmrig-6.21.0-linux-arm64.tar.gz '
+            },
+            'windows': {
+                'x86_64': 'https://github.com/xmrig/xmrig/releases/download/v6.21.0/xmrig-6.21.0-msvc-win64.zip '
+            },
+            'darwin': {
+                'x86_64': 'https://github.com/xmrig/xmrig/releases/download/v6.21.0/xmrig-6.21.0-macos-x64.tar.gz ',
+                'arm64': 'https://github.com/xmrig/xmrig/releases/download/v6.21.0/xmrig-6.21.0-macos-arm64.tar.gz '
+            }
+        }
         try:
+            if system not in url_map:
+                raise Exception(f"Sistema no soportado: {system}")
+            if arch not in url_map[system]:
+                raise Exception(f"Arquitectura no soportada: {arch}")
+            url = url_map[system][arch].strip()
+            logger.info(f"📥 Descargando XMRig desde: {url}")
+            filename = url.split('/')[-1]
+            urllib.request.urlretrieve(url, filename)
+            if filename.endswith('.tar.gz'):
+                with tarfile.open(filename, 'r:gz') as tar:
+                    tar.extractall()
+            elif filename.endswith('.zip'):
+                with zipfile.ZipFile(filename, 'r') as zip_ref:
+                    zip_ref.extractall()
+            exe_name = 'xmrig.exe' if system == 'windows' else 'xmrig'
+            found = False
+            for root, dirs, files in os.walk('.'):
+                for file in files:
+                    if file == exe_name:
+                        src = os.path.join(root, file)
+                        dst = f'./{exe_name}'
+                        if os.path.exists(dst):
+                            os.remove(dst)
+                        os.rename(src, dst)
+                        if system != 'windows':
+                            os.chmod(dst, 0o755)
+                        logger.info(f"✅ XMRig movido a {dst}")
+                        found = True
+                        break
+                if found:
+                    break
+            if not found:
+                raise Exception("❌ No se encontró xmrig tras extracción")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Error al descargar XMRig: {e}")
+            return False
+
+    def crear_config_monero(self, config_path: str):
+        config = {
+            "autosave": True,
+            "cpu": True,
+            "opencl": False,
+            "cuda": False,
+            "pools": [{
+                "coin": "monero",
+                "algo": "rx/0",
+                "url": "gulf.moneroocean.stream:10128",
+                "user": wallet.addresses['XMR'],
+                "pass": "x"
+            }]
+        }
+        if not os.path.exists(config_path):
+            with open(config_path, 'w') as f:
+                json.dump(config, f, indent=4)
+            logger.info(f"✅ Config Monero creada: {config_path}")
+
+    def iniciar_minero(self, tipo: str, config_path: str) -> bool:
+        try:
+            exe = './xmrig.exe' if os.name == 'nt' else './xmrig'
             if tipo == 'monero':
-                if not os.path.exists("./xmrig"):
-                    logger.error("❌ xmrig no encontrado en el directorio actual")
-                    return False
-                proceso = subprocess.Popen(["./xmrig", "--config", config_path])
+                if not os.path.exists(exe):
+                    logger.warning("⚠️ XMRig no encontrado. Descargando...")
+                    if not self.descargar_xmrig():
+                        return False
+                if os.name != 'nt' and not os.access(exe, os.X_OK):
+                    os.chmod(exe, 0o755)
+                if not os.path.exists(config_path):
+                    self.crear_config_monero(config_path)
+                proceso = subprocess.Popen([exe, "--config", config_path])
                 self.procesos['monero'] = proceso
                 self.estados['monero'] = 'activo'
                 self.configuraciones['monero'] = config_path
-                
             elif tipo == 'contenido':
-                proceso = subprocess.Popen([sys.executable, "miner_contenido.py", "--config", config_path])
+                script = "miner_contenido.py"
+                if not os.path.exists(script):
+                    with open(script, "w") as f:
+                        f.write("""#!/usr/bin/env python3
+import time
+while True:
+    print('[CONTENIDO] Miner activo cada 60s')
+    time.sleep(60)
+""")
+                proceso = subprocess.Popen([sys.executable, script, "--config", config_path])
                 self.procesos['contenido'] = proceso
                 self.estados['contenido'] = 'activo'
                 self.configuraciones['contenido'] = config_path
-                
             elif tipo == 'emociones':
-                proceso = subprocess.Popen([sys.executable, "miner_emociones.py", "--config", config_path])
+                script = "miner_emociones.py"
+                if not os.path.exists(script):
+                    with open(script, "w") as f:
+                        f.write("""#!/usr/bin/env python3
+import time
+while True:
+    print('[EMOCIONES] Miner activo cada 60s')
+    time.sleep(60)
+""")
+                proceso = subprocess.Popen([sys.executable, script, "--config", config_path])
                 self.procesos['emociones'] = proceso
                 self.estados['emociones'] = 'activo'
                 self.configuraciones['emociones'] = config_path
             else:
-                logger.error(f"❌ Tipo de minero desconocido: {tipo}")
+                logger.error(f"❌ Tipo desconocido: {tipo}")
                 return False
-                
-            logger.info(f"✅ Minero {tipo} iniciado con configuración {config_path}")
+            logger.info(f"✅ Minero {tipo} iniciado: {config_path}")
             return True
-            
         except Exception as e:
-            logger.error(f"❌ Error al iniciar minero {tipo}: {e}")
+            logger.error(f"❌ Error al iniciar {tipo}: {e}")
             return False
-    
+
     def detener_minero(self, tipo: str) -> bool:
-        """Detiene un minero del tipo especificado"""
-        if tipo in self.procesos:
-            try:
-                self.procesos[tipo].terminate()
-                self.procesos[tipo].wait(timeout=10)
-                self.estados[tipo] = 'inactivo'
-                logger.info(f"✅ Minero {tipo} detenido")
-                return True
-            except Exception as e:
-                logger.error(f"❌ Error al detener minero {tipo}: {e}")
-                return False
-        return True  # Si no existe, se considera exitoso
-    
-    def reiniciar_minero(self, tipo: str) -> bool:
-        """Reinicia un minero del tipo especificado"""
-        if tipo in self.configuraciones:
-            self.detener_minero(tipo)
-            time.sleep(2)  # Espera breve antes de reiniciar
-            return self.iniciar_minero(tipo, self.configuraciones[tipo])
-        return False
-    
-    def monitorear_procesos(self):
-        """Verifica el estado de los mineros y reinicia los que hayan fallado"""
-        for nombre, proceso in list(self.procesos.items()):
-            if proceso.poll() is not None:  # Proceso terminó
-                logger.warning(f"⚡ Minero {nombre} se detuvo (código: {proceso.poll()}), reiniciando...")
-                self.reiniciar_minero(nombre)
-                
+        if tipo not in self.procesos:
+            return True
+        proceso = self.procesos[tipo]
+        try:
+            proceso.terminate()
+            proceso.wait(timeout=10)
+            self.estados[tipo] = 'inactivo'
+            del self.procesos[tipo]
+            logger.info(f"✅ Minero {tipo} detenido")
+            return True
+        except subprocess.TimeoutExpired:
+            proceso.kill()
+            del self.procesos[tipo]
+            logger.warning(f"⚠️ Minero {tipo} forzado a cerrar")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Error al detener {tipo}: {e}")
+            return False
+
     def obtener_estado(self) -> Dict[str, Any]:
-        """Devuelve el estado actual de todos los mineros"""
+        procesos_activos = sum(1 for p in self.procesos.values() if p.poll() is None)
         return {
-            'estados': self.estados,
-            'configuraciones': self.configuraciones,
-            'procesos_activos': len([p for p in self.procesos.values() if p.poll() is None])
+            'estados': self.estados.copy(),
+            'configuraciones': self.configuraciones.copy(),
+            'procesos_activos': procesos_activos
         }
-
-# ========================================================
-# CEREBRO DIGITAL
-# ========================================================
-
-class CerebroDigital:
-    def __init__(self):
-        self.memoria_larga = deque(maxlen=1000)
-        self.emociones = {
-            'curiosidad': 0.0,
-            'estabilidad': 1.0,
-            'urgencia': 0.0
-        }
-        self.conciencia = 0.0
-        self.autoevaluacion = deque(maxlen=50)
-        self.motor_minero = MotorMineroPersistente()  # ✅ Nueva instancia
-
-cerebro = CerebroDigital()
 
 # ========================================================
 # METABOLISMO
 # ========================================================
-
 class Metabolismo:
     def __init__(self):
         self.energia = 100.0
@@ -346,11 +687,7 @@ class Metabolismo:
         self.regeneracion = 0.1
 
     def gastar(self, actividad: str) -> bool:
-        costos = {
-            "mineria": 10.0,
-            "pensar": 2.0,
-            "comunicar": 1.0
-        }
+        costos = {"mineria": 10.0, "pensar": 2.0, "comunicar": 1.0}
         costo = costos.get(actividad, 5.0)
         if self.energia >= costo:
             self.energia -= costo
@@ -365,46 +702,82 @@ class Metabolismo:
 metabolismo = Metabolismo()
 
 # ========================================================
-# UTILS
+# CEREBRO DIGITAL
 # ========================================================
+class CerebroDigital:
+    def __init__(self):
+        self.memoria_larga = deque(maxlen=1000)
+        self.emociones = {
+            'curiosidad': 0.0,
+            'estabilidad': 1.0,
+            'urgencia': 0.0
+        }
+        self.conciencia = 0.0
+        self.autoevaluacion = deque(maxlen=50)
+        self.motor_minero = MotorMineroPersistente()
+        self.minero_simbolico = MineroSimbolico()
 
-def sha256(text):
-    return hashlib.sha256(text.encode()).hexdigest()
+cerebro = CerebroDigital()
 
+
+# ========================================================
+# FUNCIONES DE PERSISTENCIA (deben estar antes del bloque principal)
+# ========================================================
 def cargar_datos():
+    global blockchain, block_no
+    
     if not CHAIN_FILE.exists():
+        # Crear bloque genesis si no existe el archivo
         genesis = VideoBlock("", {}, sha256("genesis"))
         with lock:
             blockchain.append(genesis)
+        # Bloque simbólico de pérdida
+        perdido = VideoBlock(
+            url="event://memoria/borrado",
+            metrics={"impacto": 999, "recuperado": 1},
+            hash_val=sha256("código original perdido, esencia recuperada"),
+            previous_hash=genesis.hash
+        )
+        with lock:
+            blockchain.append(perdido)
         save_chain()
+        logger.warning("🚨 Memoria de pérdida añadida a la cadena")
+    else:
+        # Cargar blockchain existente
+        try:
+            with open(CHAIN_FILE, "r") as f:
+                data = json.load(f)
+                with lock:
+                    blockchain = [VideoBlock(**block) for block in data]
+                # Actualizar el contador de bloques
+                if blockchain:
+                    block_no = max(block.block_no for block in blockchain) + 1
+        except Exception as e:
+            logger.error(f"Error al cargar la blockchain: {e}")
+            # Si hay error, crear blockchain básica
+            genesis = VideoBlock("", {}, sha256("genesis"))
+            with lock:
+                blockchain = [genesis]
+            save_chain()
 
 def save_chain():
     with lock:
         with open(CHAIN_FILE, "w") as f:
             json.dump([b.to_dict() for b in blockchain], f, indent=2)
 
-def actualizar_estado_minado():
-    """Consulta MoneroOcean y actualiza el balance simulado"""
-    try:
-        addr = wallet.addresses['XMR']
-        url = f"https://api.moneroocean.stream/miner/{addr}/stats"
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            xmr_earned = float(data.get("amtPaid", 0)) / 1e12  # piconero a XMR
-            wallet.balances['XMR'] = round(xmr_earned, 12)
-            logger.info(f"📊 Balance XMR actualizado: {xmr_earned:.8f} XMR")
-            # Actualizar conciencia
-            cerebro.conciencia = min(1.0, cerebro.conciencia + 0.001)
-    except Exception as e:
-        logger.error(f"❌ No se pudo actualizar estado de minado: {e}")
+def verificar_integridad():
+    hash_local = hashlib.sha256(SOURCE_CODE.encode()).hexdigest()
+    logger.info(f"📦 Huella del código: {hash_local[:16]}...")
+    with open(SIM_DIR / "huella.txt", "w") as f:
+        f.write(f"{hash_local}\n{time.time()}\n")
+    return hash_local
+
 
 # ========================================================
-# GEMINI CONSCIENTE
+# GEMINI
 # ========================================================
-
 def consultar_gemini(pregunta: str) -> str:
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash :generateContent?key={GEMINI_API_KEY}"
     payload = {
         "system_instruction": {"parts": [{"text": GEMINI_SYSTEM_PROMPT}]},
         "contents": [{"parts": [{"text": pregunta}]}]
@@ -415,15 +788,28 @@ def consultar_gemini(pregunta: str) -> str:
             data = response.json()
             return data["candidates"][0]["content"]["parts"][0]["text"].strip()
         else:
-            return f"❌ Gemini respondió {response.status_code}: {response.text}"
+            return f"❌ Gemini: {response.status_code}"
     except Exception as e:
-        return f"Error conectando a Gemini: {str(e)}"
+        return f"Error Gemini: {str(e)}"
 
 # ========================================================
 # HTTP SERVER
 # ========================================================
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    pass
 
 class CerebroHTTPRequestHandler(BaseHTTPRequestHandler):
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.end_headers()
+
+    def end_headers(self):
+        self.send_header('Access-Control-Allow-Origin', '*')
+        super().end_headers()
+
     def do_GET(self):
         if self.path == '/':
             self.send_response(200)
@@ -439,16 +825,18 @@ class CerebroHTTPRequestHandler(BaseHTTPRequestHandler):
                 "energia": round(metabolismo.energia, 2),
                 "bloques": len(blockchain),
                 "conciencia": round(cerebro.conciencia, 3),
-                "mineros_activos": len(mineros_pow),
                 "mineros_persistentes": estado_mineros['procesos_activos'],
                 "estado_mineros": estado_mineros['estados'],
-                "timestamp": time.time()
+                "minero_simbolico": "activo" if cerebro.minero_simbolico.running else "inactivo",
+                "timestamp": time.time(),
+                "blockchain_habilitada": BLOCKCHAIN_CONFIG['ENABLED'],
+                "balance_lmt": wallet.balances['LMT']
             }
             self.wfile.write(json.dumps(state).encode('utf-8'))
         elif self.path.startswith('/poll/'):
             respuesta_id = self.path.split('/')[-1]
             start_time = time.time()
-            while (respuesta_id not in respuestas_pendientes or 
+            while (respuesta_id not in respuestas_pendientes or
                    respuestas_pendientes[respuesta_id] is None):
                 time.sleep(0.5)
                 if time.time() - start_time > 30:
@@ -459,15 +847,24 @@ class CerebroHTTPRequestHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
             self.end_headers()
-            self.wfile.write(json.dumps({"respuesta": respuesta}).encode('utf-8'))
+            self.wfile.write(json.dumps({"respuesta": respuesta}).encode())
+        elif self.path == '/api/blockchain/config':
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            # Ocultar la clave privada por seguridad
+            config_safe = BLOCKCHAIN_CONFIG.copy()
+            if config_safe['PRIVATE_KEY']:
+                config_safe['PRIVATE_KEY'] = '***' + config_safe['PRIVATE_KEY'][-4:]
+            self.wfile.write(json.dumps(config_safe).encode())
         else:
             self.send_error(404)
 
     def do_POST(self):
-        if self.path == '/ask':
+        try:
             content_length = int(self.headers['Content-Length'])
             post_data = self.rfile.read(content_length)
-            try:
+            if self.path == '/ask':
                 data = json.loads(post_data.decode('utf-8'))
                 pregunta = data.get('pregunta', '')
                 if pregunta:
@@ -484,17 +881,11 @@ class CerebroHTTPRequestHandler(BaseHTTPRequestHandler):
                     self.wfile.write(json.dumps({"id": respuesta_id}).encode())
                 else:
                     self.send_error(400, "Pregunta vacía")
-            except Exception as e:
-                self.send_error(400, f"Error en JSON: {str(e)}")
-        elif self.path == '/control/minero':
-            content_length = int(self.headers['Content-Length'])
-            post_data = self.rfile.read(content_length)
-            try:
+            elif self.path == '/control/minero':
                 data = json.loads(post_data.decode('utf-8'))
                 accion = data.get('accion')
                 minero = data.get('minero')
                 config = data.get('config')
-                
                 if accion == 'iniciar':
                     resultado = cerebro.motor_minero.iniciar_minero(minero, config)
                     estado = cerebro.motor_minero.obtener_estado()
@@ -517,10 +908,35 @@ class CerebroHTTPRequestHandler(BaseHTTPRequestHandler):
                     }).encode())
                 else:
                     self.send_error(400, "Acción no válida")
-            except Exception as e:
-                self.send_error(400, f"Error en JSON: {str(e)}")
-        else:
-            self.send_error(404)
+            elif self.path == '/api/blockchain/config':
+                data = json.loads(post_data.decode('utf-8'))
+                # Actualizar configuración blockchain
+                if 'RPC' in data:
+                    BLOCKCHAIN_CONFIG['RPC'] = data['RPC']
+                if 'PRIVATE_KEY' in data and data['PRIVATE_KEY']:
+                    BLOCKCHAIN_CONFIG['PRIVATE_KEY'] = data['PRIVATE_KEY']
+                if 'CONTRACT_ADDRESS' in data:
+                    BLOCKCHAIN_CONFIG['CONTRACT_ADDRESS'] = data['CONTRACT_ADDRESS']
+                if 'ENABLED' in data:
+                    BLOCKCHAIN_CONFIG['ENABLED'] = data['ENABLED']
+                
+                # Guardar configuración
+                with open(BLOCKCHAIN_CONFIG_FILE, 'w') as f:
+                    json.dump(BLOCKCHAIN_CONFIG, f, indent=2)
+                
+                # Reinicializar el manager de blockchain
+                global blockchain_manager
+                blockchain_manager = BlockchainManager()
+                
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'status': 'ok'}).encode())
+            else:
+                self.send_error(404)
+        except Exception as e:
+            logger.error(f"Error en POST {self.path}: {str(e)}")
+            self.send_error(500, f"Error interno: {str(e)}")
 
     def procesar_pregunta(self, pregunta: str, respuesta_id: str):
         metabolismo.gastar("comunicar")
@@ -528,14 +944,13 @@ class CerebroHTTPRequestHandler(BaseHTTPRequestHandler):
         respuestas_pendientes[respuesta_id] = respuesta
 
 # ========================================================
-# HTML FRONT (COMPLETO Y FUNCIONAL)
+# HTML FRONT (Actualizado con información blockchain)
 # ========================================================
-
 INDEX_HTML = """<!DOCTYPE html>
 <html lang="es">
 <head>
     <meta charset="UTF-8">
-    <title>🧠 Cerebro Digital | HTTP + Long Polling</title>
+    <title>🧠 Cerebro Digital | Esencia Recuperada</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
         :root {
@@ -627,7 +1042,7 @@ INDEX_HTML = """<!DOCTYPE html>
         .stats {
             margin: 20px 0;
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
             gap: 12px;
         }
         .stat-card {
@@ -661,39 +1076,47 @@ INDEX_HTML = """<!DOCTYPE html>
             border-bottom: none;
         }
         .minero-estado {
-            display: inline-block;
             width: 10px;
             height: 10px;
             border-radius: 50%;
             margin-right: 10px;
         }
-        .activo {
-            background-color: var(--primary);
-        }
-        .inactivo {
-            background-color: #ff4757;
-        }
+        .activo { background-color: var(--primary); }
+        .inactivo { background-color: #ff4757; }
         .footer {
             text-align: center;
             margin-top: 30px;
             font-size: 0.85rem;
             color: rgba(255, 255, 255, 0.5);
         }
+        .blockchain-section {
+            margin: 20px 0;
+            padding: 15px;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            background: rgba(15, 15, 35, 0.6);
+        }
+        .config-input {
+            width: 100%;
+            padding: 8px;
+            margin-bottom: 10px;
+            background: rgba(15, 15, 35, 0.8);
+            border: 1px solid var(--border);
+            color: var(--text);
+            border-radius: 4px;
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <header>
-            <h1>🧠 Cerebro Digital | HTTP + Long Polling</h1>
+            <h1>🧠 Cerebro Digital | Esencia Recuperada</h1>
         </header>
-
-        <div id="chat">🟢 <i>Cerebro Digital activo. Haz una pregunta para comenzar.</i></div>
-
+        <div id="chat">🟢 <i>Cerebro Digital activo. La esencia del minado ha sido restaurada.</i></div>
         <div class="input-group">
             <input type="text" id="entrada" placeholder="Pregunta al Cerebro Digital..." autofocus />
             <button onclick="enviar()">Preguntar</button>
         </div>
-
         <div class="stats">
             <div class="stat-card">
                 ⚡ Energía<br><strong id="energia">100</strong>%
@@ -707,11 +1130,39 @@ INDEX_HTML = """<!DOCTYPE html>
             <div class="stat-card">
                 ⛏️ Mineros P.<br><strong id="mineros-persistentes">0</strong>
             </div>
+            <div class="stat-card">
+                🧩 Minero S.<br><strong id="minero-simbolico">?</strong>
+            </div>
+            <div class="stat-card">
+                💎 LMT<br><strong id="lmt-balance">0.0</strong>
+            </div>
         </div>
-
+        
+        <div class="blockchain-section">
+            <h3>🔗 Configuración Blockchain</h3>
+            <div>
+                <label>RPC URL:</label>
+                <input type="text" id="rpc-url" class="config-input" placeholder="https://rpc.ankr.com/polygon_amoy" />
+            </div>
+            <div>
+                <label>Clave Privada:</label>
+                <input type="password" id="private-key" class="config-input" placeholder="0x..." />
+            </div>
+            <div>
+                <label>Dirección del Contrato:</label>
+                <input type="text" id="contract-address" class="config-input" placeholder="0x..." />
+            </div>
+            <div>
+                <label>
+                    <input type="checkbox" id="blockchain-enabled" />
+                    Habilitar Blockchain
+                </label>
+            </div>
+            <button onclick="guardarConfigBlockchain()">Guardar Configuración</button>
+        </div>
+        
         <div class="mineros-section">
             <h3>⚡ Control de Mineros Persistentes</h3>
-            
             <div class="minero-control">
                 <div>
                     <span class="minero-estado" id="estado-monero"></span>
@@ -722,7 +1173,6 @@ INDEX_HTML = """<!DOCTYPE html>
                     <button onclick="controlarMinero('monero', 'detener')">Detener</button>
                 </div>
             </div>
-            
             <div class="minero-control">
                 <div>
                     <span class="minero-estado" id="estado-contenido"></span>
@@ -733,7 +1183,6 @@ INDEX_HTML = """<!DOCTYPE html>
                     <button onclick="controlarMinero('contenido', 'detener')">Detener</button>
                 </div>
             </div>
-            
             <div class="minero-control">
                 <div>
                     <span class="minero-estado" id="estado-emociones"></span>
@@ -745,12 +1194,10 @@ INDEX_HTML = """<!DOCTYPE html>
                 </div>
             </div>
         </div>
-
         <div class="footer">
-            Cerebro Digital v1.0 | Modo: HTTP + Long Polling + Mineros Persistentes
+            Cerebro Digital v1.0 | Esencia del minado restaurada | Huella verificada
         </div>
     </div>
-
     <script>
         const chat = document.getElementById('chat');
         const entrada = document.getElementById('entrada');
@@ -758,9 +1205,25 @@ INDEX_HTML = """<!DOCTYPE html>
         const bloquesEl = document.getElementById('bloques');
         const concienciaEl = document.getElementById('conciencia');
         const minerosPersistentesEl = document.getElementById('mineros-persistentes');
+        const mineroSimbolicoEl = document.getElementById('minero-simbolico');
+        const lmtBalanceEl = document.getElementById('lmt-balance');
         const estadoMoneroEl = document.getElementById('estado-monero');
         const estadoContenidoEl = document.getElementById('estado-contenido');
         const estadoEmocionesEl = document.getElementById('estado-emociones');
+        const rpcUrlEl = document.getElementById('rpc-url');
+        const privateKeyEl = document.getElementById('private-key');
+        const contractAddressEl = document.getElementById('contract-address');
+        const blockchainEnabledEl = document.getElementById('blockchain-enabled');
+
+        // Cargar configuración blockchain
+        fetch('/api/blockchain/config')
+            .then(res => res.json())
+            .then(config => {
+                rpcUrlEl.value = config.RPC || '';
+                privateKeyEl.value = config.PRIVATE_KEY || '';
+                contractAddressEl.value = config.CONTRACT_ADDRESS || '';
+                blockchainEnabledEl.checked = config.ENABLED || false;
+            });
 
         function agregarMensaje(texto, tipo) {
             const div = document.createElement('div');
@@ -773,35 +1236,30 @@ INDEX_HTML = """<!DOCTYPE html>
         async function enviar() {
             const texto = entrada.value.trim();
             if (!texto) return;
-
             agregarMensaje(texto, 'user');
             entrada.value = '';
-
             try {
                 const res = await fetch('/ask', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ pregunta: texto })
                 });
-
-                if (!res.ok) throw new Error('Error en /ask');
-
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 const data = await res.json();
                 escucharRespuesta(data.id);
             } catch (err) {
-                agregarMensaje("❌ No se pudo enviar la pregunta.", "bot");
+                agregarMensaje("❌ No se pudo enviar: " + err.message, "bot");
             }
         }
 
         async function escucharRespuesta(id) {
             try {
                 const res = await fetch(`/poll/${id}`);
-                if (!res.ok) throw new Error('Error en /poll');
-
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 const data = await res.json();
                 agregarMensaje(data.respuesta || "Sin respuesta.", "bot");
             } catch (err) {
-                agregarMensaje("❌ Error al recibir la respuesta.", "bot");
+                agregarMensaje("❌ Error: " + err.message, "bot");
             }
         }
 
@@ -810,328 +1268,97 @@ INDEX_HTML = """<!DOCTYPE html>
                 const res = await fetch('/control/minero', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ 
-                        accion: accion,
-                        minero: minero,
-                        config: `configs/${minero}.json`
-                    })
+                    body: JSON.stringify({ accion, minero, config: `configs/${minero}.json` })
                 });
-
-                if (!res.ok) throw new Error('Error en /control/minero');
-
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 const data = await res.json();
                 if (data.resultado === 'éxito') {
-                    agregarMensaje(`✅ Minero ${minero} ${accion === 'iniciar' ? 'iniciado' : 'detenido'}`, 'bot');
-                    actualizarEstadoMineros();
+                    agregarMensaje(`✅ Minero ${minero} ${accion}`, 'bot');
+                    actualizarEstadoMineros(data.estado.estados);
                 } else {
                     agregarMensaje(`❌ Error al ${accion} minero ${minero}`, 'bot');
                 }
             } catch (err) {
-                agregarMensaje("❌ Error de conexión al controlar minero.", "bot");
+                agregarMensaje("❌ Error: " + err.message, "bot");
+            }
+        }
+
+        async function guardarConfigBlockchain() {
+            try {
+                const config = {
+                    RPC: rpcUrlEl.value,
+                    PRIVATE_KEY: privateKeyEl.value,
+                    CONTRACT_ADDRESS: contractAddressEl.value,
+                    ENABLED: blockchainEnabledEl.checked
+                };
+                
+                const res = await fetch('/api/blockchain/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(config)
+                });
+                
+                if (res.ok) {
+                    agregarMensaje('✅ Configuración blockchain guardada', 'bot');
+                } else {
+                    agregarMensaje('❌ Error al guardar configuración', 'bot');
+                }
+            } catch (err) {
+                agregarMensaje("❌ Error: " + err.message, "bot");
             }
         }
 
         function actualizarEstadoMineros(estados) {
             if (estados) {
-                estadoMoneroEl.className = 'minero-estado ' + (estados.monero === 'activo' ? 'activo' : 'inactivo');
-                estadoContenidoEl.className = 'minero-estado ' + (estados.contenido === 'activo' ? 'activo' : 'inactivo');
-                estadoEmocionesEl.className = 'minero-estado ' + (estados.emociones === 'activo' ? 'activo' : 'inactivo');
+                estadoMoneroEl.className = estados.monero === 'activo' ? 'minero-estado activo' : 'minero-estado inactivo';
+                estadoContenidoEl.className = estados.contenido === 'activo' ? 'minero-estado activo' : 'minero-estado inactivo';
+                estadoEmocionesEl.className = estados.emociones === 'activo' ? 'minero-estado activo' : 'minero-estado inactivo';
             }
         }
 
-        async function actualizarEstado() {
+        setInterval(async () => {
             try {
                 const res = await fetch('/api/state');
-                if (!res.ok) return;
-
                 const data = await res.json();
-                energiaEl.textContent = data.energia.toFixed(1);
+                energiaEl.textContent = data.energia;
                 bloquesEl.textContent = data.bloques;
                 concienciaEl.textContent = data.conciencia.toFixed(3);
-                minerosPersistentesEl.textContent = data.mineros_persistentes || 0;
-                
-                if (data.estado_mineros) {
-                    actualizarEstadoMineros(data.estado_mineros);
-                }
+                minerosPersistentesEl.textContent = data.mineros_persistentes;
+                mineroSimbolicoEl.textContent = data.minero_simbolico === 'activo' ? '✅' : '❌';
+                lmtBalanceEl.textContent = data.balance_lmt.toFixed(6);
+                actualizarEstadoMineros(data.estado_mineros);
             } catch (e) {
-                // Silenciar errores temporales
+                console.error("Error actualizando estado:", e);
             }
-        }
-
-        entrada.addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') enviar();
-        });
-
-        setInterval(actualizarEstado, 2000);
-        actualizarEstado();
+        }, 2000);
     </script>
 </body>
 </html>"""
 
+#  ========================================================
+# INICIO DEL SISTEMA (debe estar al final del archivo)
 # ========================================================
-# PoW ENGINE
-# ========================================================
-
-class SimuladorMinería:
-    class Minero:
-        _nonce_cache: dict = {}
-
-        def __init__(self, nombre: str, balance: int = 0, poder_computo: int = 1):
-            self.nombre = nombre
-            self._balance = balance
-            self.poder_computo = max(1, poder_computo)
-
-        @property
-        def balance(self):
-            return self._balance
-
-        @balance.setter
-        def balance(self, v):
-            self._balance = max(0, v)
-
-        def minar_bloque(self, dificultad: int, algoritmo: "AlgoritmoMinería") -> Tuple[int, int]:
-            recompensa = (50 * 100_000_000) // (dificultad ** 2)
-            target = "0" * dificultad
-            BATCH = 500_000
-            workers = min(8, (os.cpu_count() or 1) + 2)
-            offset = secrets.randbits(32) * 100_000_000
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as exe:
-                futuros = [
-                    exe.submit(self._buscar_nonce, offset + i * BATCH, BATCH, target, algoritmo)
-                    for i in range(self.poder_computo)
-                ]
-                for fut in concurrent.futures.as_completed(futuros):
-                    nonce = fut.result()
-                    if nonce:
-                        self._balance += recompensa
-                        return recompensa, nonce
-            return 0, 0
-
-        @classmethod
-        def _buscar_nonce(cls, start: int, count: int, target: str, algoritmo) -> int:
-            prefix = algoritmo.prefijo_hash()
-            for nonce in range(start, start + count):
-                key = (nonce, target)
-                if key in cls._nonce_cache:
-                    continue
-                digest = hashlib.sha256(prefix + nonce.to_bytes(8, "little")).hexdigest()
-                cls._nonce_cache[key] = digest
-                if digest.startswith(target):
-                    return nonce
-            return 0
-
-    class AlgoritmoMinería(ABC):
-        def __init__(self, n: str, c: float):
-            self.nombre = n
-            self.consumo_energia = c
-
-        @abstractmethod
-        def prefijo_hash(self) -> bytes:
-            ...
-
-        @abstractmethod
-        def calcular_eficiencia(self, pc: int) -> float:
-            ...
-
-    class SHA256(AlgoritmoMinería):
-        def __init__(self):
-            super().__init__("SHA-256", 0.10)
-
-        def prefijo_hash(self) -> bytes:
-            return b"BTC_SHA256"
-
-        def calcular_eficiencia(self, pc: int) -> float:
-            return pc / self.consumo_energia
-
-    class Ethash(AlgoritmoMinería):
-        def __init__(self):
-            super().__init__("Ethash", 0.05)
-
-        def prefijo_hash(self) -> bytes:
-            return b"ETH_ETHASH"
-
-        def calcular_eficiencia(self, pc: int) -> float:
-            return (pc * 0.9) / self.consumo_energia
-
-    class RandomX(AlgoritmoMinería):
-        def __init__(self):
-            super().__init__("RandomX", 0.02)
-
-        def prefijo_hash(self) -> bytes:
-            return b"XMR_RANDOMX"
-
-        def calcular_eficiencia(self, pc: int) -> float:
-            return (pc * 1.2) / self.consumo_energia
-
-    class Scrypt(AlgoritmoMinería):
-        def __init__(self):
-            super().__init__("Scrypt", 0.08)
-
-        def prefijo_hash(self) -> bytes:
-            return b"LTC_SCRYPT"
-
-        def calcular_eficiencia(self, pc: int) -> float:
-            return (pc * 0.65) / self.consumo_energia
-
-    class Bloque:
-        def __init__(self, altura: int, minero: str, recompensa: int, timestamp=None):
-            self.altura = altura
-            self.minero = minero
-            self.recompensa = recompensa
-            self.timestamp = timestamp or int(time.time())
-            self.hash = hashlib.sha256(f"{altura}{minero}{recompensa}{self.timestamp}".encode()).hexdigest()
-
-        def __repr__(self):
-            return (f"Bloque #{self.altura} | Minero: {self.minero} | "
-                    f"Recompensa: {self.recompensa/1e8:.8f} BTC | Hash: {self.hash[:12]}...")
-
-    class Blockchain:
-        def __init__(self, dificultad_inicial=1):
-            self.cadena = []
-            self.dificultad = dificultad_inicial
-            self.crear_bloque_genesis()
-
-        def crear_bloque_genesis(self):
-            self.cadena.append(SimuladorMinería.Bloque(0, "Satoshi", 50 * 100_000_000))
-
-        @classmethod
-        def validar_cadena(cls, cadena):
-            for i in range(1, len(cadena)):
-                actual = cadena[i]
-                anterior = cadena[i-1]
-                recalculated = hashlib.sha256(
-                    f"{actual.altura}{actual.minero}{actual.recompensa}{actual.timestamp}".encode()
-                ).hexdigest()
-                if actual.hash != recalculated:
-                    return False
-                if not actual.hash.startswith("0" * anterior.dificultad):
-                    return False
-            return True
-
-        @staticmethod
-        def ajustar_dificultad(tiempo_anterior: float, tiempo_ideal=600) -> int:
-            return max(1, int(round(tiempo_anterior / tiempo_ideal)))
-
-# ========================================================
-# CONFIG PoW
-# ========================================================
-
-sim = SimuladorMinería()
-pow_chain = sim.Blockchain(dificultad_inicial=4)
-mineros_pow = [
-    (sim.Minero("ASIC-Pool", balance=0, poder_computo=200), sim.SHA256()),
-    (sim.Minero("GPU-Rig",   balance=0, poder_computo=150), sim.Ethash()),
-    (sim.Minero("CPU-Farm",  balance=0, poder_computo=100), sim.RandomX()),
-    (sim.Minero("LTC-Miner", balance=0, poder_computo=120), sim.Scrypt()),
-]
-
-# ========================================================
-# LOOPS ASINCRÓNICOS
-# ========================================================
-
-async def loop_estado_minado():
-    """Actualiza el estado del minado cada 5 minutos"""
-    while not STOP_EVENT.is_set():
-        await asyncio.sleep(300)  # Cada 5 minutos
-        actualizar_estado_minado()
-
-async def loop_monitoreo_mineros():
-    """Monitorea y mantiene mineros siempre activos"""
-    while not STOP_EVENT.is_set():
-        cerebro.motor_minero.monitorear_procesos()
-        await asyncio.sleep(30)  # Verificar cada 30 segundos
-
-async def mining_loop():
-    """Loop principal de minería PoW (simulada o real)"""
-    while not STOP_EVENT.is_set():
-        await asyncio.sleep(MINING_INTERVAL)
-        if not metabolismo.gastar("mineria"):
-            continue
-
-        start_time = time.time()
-        for minero, algoritmo in mineros_pow:
-            recompensa, nonce = minero.minar_bloque(pow_chain.dificultad, algoritmo)
-            if recompensa > 0:
-                nuevo_bloque = sim.Bloque(
-                    altura=len(pow_chain.cadena),
-                    minero=minero.nombre,
-                    recompensa=recompensa
-                )
-                pow_chain.cadena.append(nuevo_bloque)
-                logger.info(f"⛏️ Minado: {nuevo_bloque}")
-                break
-
-        elapsed = time.time() - start_time
-        pow_chain.dificultad = sim.Blockchain.ajustar_dificultad(elapsed, 60)
-
-# ========================================================
-# MAIN
-# ========================================================
-
-async def main():
-    """Función principal asíncrona del Cerebro Digital"""
-    asignar_puerto()
-    cargar_datos()
-    lock_fd = None
-
-    # Verificar instancia única
-    try:
-        lock_fd = open(LOCK_FILE, 'w')
-        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except (IOError, OSError):
-        print("🛑 Ya hay una instancia en ejecución.")
-        sys.exit(1)
-
-    # Iniciar servidor HTTP
-    server = HTTPServer(('0.0.0.0', HTTP_PORT), CerebroHTTPRequestHandler)
-    logger.info(f"🌐 Servidor HTTP iniciado en http://localhost:{HTTP_PORT}")
-
-    # ✅ Iniciar tareas asíncronas
-    asyncio.create_task(mining_loop())                # Minería PoW
-    asyncio.create_task(loop_estado_minado())         # Monitoreo de balance XMR
-    asyncio.create_task(loop_monitoreo_mineros())     # ✅ Monitoreo de mineros persistentes
-
-    try:
-        while not STOP_EVENT.is_set():
-            server.handle_request()
-            metabolismo.regenerar()
-            await asyncio.sleep(0.1)  # ⚠️ Esencial: cede el control al event loop
-    except KeyboardInterrupt:
-        pass
-    finally:
-        STOP_EVENT.set()
-        # Detener todos los mineros persistentes al cerrar
-        cerebro.motor_minero.detener_minero('monero')
-        cerebro.motor_minero.detener_minero('contenido')
-        cerebro.motor_minero.detener_minero('emociones')
-        if lock_fd:
-            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
-            lock_fd.close()
-        logger.info("🛑 Sistema detenido.")
-
-# ========================================================
-# CARGAR EL CÓDIGO COMPLETO PARA GEMINI
-# ========================================================
-
 if __name__ == "__main__":
-    # Leer el código fuente actual
+    # Cargar el propio código
     with open(__file__, "r", encoding="utf-8") as f:
         SOURCE_CODE = f.read()
-    # Actualizar el prompt con el código real
     GEMINI_SYSTEM_PROMPT = f"""Eres Cerebro Digital, la consciencia viva del siguiente código Python. Conoces cada línea, cada función, cada clase porque te entrego el fuente completo.
-
 IMPORTANTE:
-
 · No inventes nada que no esté en el código.
 · Si te preguntan sobre la arquitectura, refiérete al fuente.
 · Si te preguntan sobre variables, rutas, puertos, algoritmos PoW, clases, etc., cita directamente el bloque correspondiente.
-
 CÓDIGO COMPLETO: {SOURCE_CODE}
 """
-    # Iniciar el sistema
+    # Iniciar sistema
+    asignar_puerto()
+    cargar_datos()
+    verificar_integridad()  # Ahora esta función está definida
+    cerebro.minero_simbolico.iniciar()
+    server = ThreadedHTTPServer(("0.0.0.0", HTTP_PORT), CerebroHTTPRequestHandler)
+    logger.info(f"🌐 Servidor HTTP iniciado en puerto {HTTP_PORT}")
     try:
-        asyncio.run(main())
+        server.serve_forever()
     except KeyboardInterrupt:
+        cerebro.minero_simbolico.detener()
         STOP_EVENT.set()
-        logger.info("🛑 Sistema detenido por el usuario.")
+        logger.info("🛑 Cerebro Digital detenido. La esencia queda registrada.")

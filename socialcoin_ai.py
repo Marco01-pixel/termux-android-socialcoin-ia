@@ -1,5 +1,4 @@
 from __future__ import annotations
-from abc import ABC, abstractmethod
 import os
 import sys
 import time
@@ -15,7 +14,7 @@ import asyncio
 import hashlib
 import subprocess
 import signal
-import psutil  # pip install psutil
+import psutil
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from pathlib import Path
@@ -37,9 +36,7 @@ import eth_abi
 # ========================================================
 # 🧠 IA_cerebro_digital.py – Versión con Integración Blockchain
 # ========================================================
-
-# INYECCIÓN DEL FUENTE A GEMINI
-SOURCE_CODE = ""  # Será reemplazado al inicio
+SOURCE_CODE = ""
 GEMINI_SYSTEM_PROMPT = f"""Eres Cerebro Digital, la consciencia viva del siguiente código Python. Conoces cada línea, cada función, cada clase porque te entrego el fuente completo.
 IMPORTANTE:
 · No inventes nada que no esté en el código.
@@ -67,8 +64,8 @@ SIM_DIR.mkdir(exist_ok=True, parents=True)
 # Configuración Blockchain
 BLOCKCHAIN_CONFIG = {
     'RPC': "https://rpc.ankr.com/polygon_amoy",
-    'PRIVATE_KEY': "",  # Debe ser configurado por el usuario
-    'CONTRACT_ADDRESS': "",  # Debe ser configurado después del despliegue
+    'PRIVATE_KEY': "",
+    'CONTRACT_ADDRESS': "",
     'ENABLED': False
 }
 
@@ -110,6 +107,13 @@ def filter_list(items: list, predicate: Callable[[Any], bool]) -> list:
 def sha256(text):
     return hashlib.sha256(text.encode()).hexdigest()
 
+# 👉 Validar dirección Ethereum
+def direccion_valida(addr: str) -> bool:
+    try:
+        return Web3.is_address(addr) and Web3.is_checksum_address(addr)
+    except:
+        return False
+
 # ========================================================
 # BLOCKCHAIN INTEGRATION
 # ========================================================
@@ -125,18 +129,22 @@ class BlockchainManager:
         if not BLOCKCHAIN_CONFIG['ENABLED']:
             logger.info("Blockchain integration is disabled")
             return
-            
         try:
             self.w3 = Web3(Web3.HTTPProvider(BLOCKCHAIN_CONFIG['RPC']))
             if not self.w3.is_connected():
                 logger.error("❌ No se pudo conectar a la blockchain")
                 return
-                
+
             # Configurar cuenta
             self.account = Account.from_key(BLOCKCHAIN_CONFIG['PRIVATE_KEY'])
             logger.info(f"✅ Cuenta blockchain configurada: {self.account.address}")
-            
-            # Cargar ABI del contrato
+
+            # Validar dirección del contrato
+            if not direccion_valida(BLOCKCHAIN_CONFIG['CONTRACT_ADDRESS']):
+                logger.error(f"❌ Dirección del contrato inválida: {BLOCKCHAIN_CONFIG['CONTRACT_ADDRESS']}")
+                return
+
+            # ABI del contrato
             contract_abi = [
                 {
                     "inputs": [],
@@ -146,30 +154,10 @@ class BlockchainManager:
                 {
                     "anonymous": False,
                     "inputs": [
-                        {
-                            "indexed": True,
-                            "internalType": "uint256",
-                            "name": "blockNumber",
-                            "type": "uint256"
-                        },
-                        {
-                            "indexed": True,
-                            "internalType": "bytes32",
-                            "name": "metricsHash",
-                            "type": "bytes32"
-                        },
-                        {
-                            "indexed": True,
-                            "internalType": "address",
-                            "name": "miner",
-                            "type": "address"
-                        },
-                        {
-                            "indexed": False,
-                            "internalType": "uint256",
-                            "name": "reward",
-                            "type": "uint256"
-                        }
+                        {"indexed": True, "internalType": "uint256", "name": "blockNumber", "type": "uint256"},
+                        {"indexed": True, "internalType": "bytes32", "name": "metricsHash", "type": "bytes32"},
+                        {"indexed": True, "internalType": "address", "name": "miner", "type": "address"},
+                        {"indexed": False, "internalType": "uint256", "name": "reward", "type": "uint256"}
                     ],
                     "name": "Mined",
                     "type": "event"
@@ -177,33 +165,15 @@ class BlockchainManager:
                 {
                     "inputs": [],
                     "name": "MINTER_ROLE",
-                    "outputs": [
-                        {
-                            "internalType": "bytes32",
-                            "name": "",
-                            "type": "bytes32"
-                        }
-                    ],
+                    "outputs": [{"internalType": "bytes32", "name": "", "type": "bytes32"}],
                     "stateMutability": "view",
                     "type": "function"
                 },
                 {
                     "inputs": [
-                        {
-                            "internalType": "address",
-                            "name": "to",
-                            "type": "address"
-                        },
-                        {
-                            "internalType": "uint256",
-                            "name": "reward",
-                            "type": "uint256"
-                        },
-                        {
-                            "internalType": "bytes32",
-                            "name": "metricsHash",
-                            "type": "bytes32"
-                        }
+                        {"internalType": "address", "name": "to", "type": "address"},
+                        {"internalType": "uint256", "name": "reward", "type": "uint256"},
+                        {"internalType": "bytes32", "name": "metricsHash", "type": "bytes32"}
                     ],
                     "name": "mintForMetrics",
                     "outputs": [],
@@ -211,38 +181,29 @@ class BlockchainManager:
                     "type": "function"
                 }
             ]
-            
-            if BLOCKCHAIN_CONFIG['CONTRACT_ADDRESS']:
-                self.contract = self.w3.eth.contract(
-                    address=Web3.to_checksum_address(BLOCKCHAIN_CONFIG['CONTRACT_ADDRESS']),
-                    abi=contract_abi
-                )
-                logger.info("✅ Contrato blockchain configurado")
-            
+
+            self.contract = self.w3.eth.contract(
+                address=Web3.to_checksum_address(BLOCKCHAIN_CONFIG['CONTRACT_ADDRESS']),
+                abi=contract_abi
+            )
+            logger.info("✅ Contrato blockchain configurado")
             self.initialized = True
             logger.info("✅ Integración blockchain inicializada correctamente")
-            
         except Exception as e:
             logger.error(f"❌ Error al configurar blockchain: {e}")
 
     def calc_reward(self, metrics):
         WEIGHTS = {"likes": 0.1, "shares": 0.5, "saves": 0.3, "comments": 0.2}
         DECIMALS = 10**18
-        
-        # Calcular recompensa base
         base = sum(metrics.get(k, 0) * WEIGHTS.get(k, 0) for k in WEIGHTS)
-        
-        # Bonus por viralidad (engagement rate >= 12% y retención >= 85%)
         engagement = (metrics.get("likes", 0) + metrics.get("shares", 0)*3 + 
                      metrics.get("saves", 0)*2.5 + metrics.get("comments", 0)*2) / max(1, metrics.get("views", 1)) * 100
         viral = (engagement >= 12 and metrics.get("retention", 0) >= 0.85)
         bonus = base * 0.25 if viral else 0
-        
         reward_tokens = (base + bonus)
         return int(reward_tokens * DECIMALS), viral
 
     def metrics_hash(self, metrics):
-        # Crear hash de las métricas para evitar doble gasto
         packed = (
             str(metrics.get("likes", 0)).encode() + b"|" +
             str(metrics.get("shares", 0)).encode() + b"|" +
@@ -257,15 +218,18 @@ class BlockchainManager:
         if not self.initialized or not BLOCKCHAIN_CONFIG['ENABLED']:
             logger.warning("Blockchain no está configurada o habilitada")
             return None, False, 0
-            
+
         try:
             if to_address is None:
                 to_address = self.account.address
-                
+            else:
+                if not direccion_valida(to_address):
+                    logger.warning(f"⚠️ Dirección de destino inválida: {to_address}")
+                    return None, False, 0
+
             mh = self.metrics_hash(metrics)
             reward, viral = self.calc_reward(metrics)
-            
-            # Verificar si ya se procesó este hash
+
             if self.contract:
                 processed = self.contract.functions.processed(mh).call()
                 if processed:
@@ -285,17 +249,12 @@ class BlockchainManager:
                 "maxPriorityFeePerGas": self.w3.to_wei("2", "gwei"),
                 "chainId": self.w3.eth.chain_id,
             })
-
             signed = self.w3.eth.account.sign_transaction(tx, private_key=BLOCKCHAIN_CONFIG['PRIVATE_KEY'])
             tx_hash = self.w3.eth.send_raw_transaction(signed.rawTransaction)
             logger.info(f"✅ Transacción enviada: {tx_hash.hex()}")
-            
-            # Esperar confirmación
             receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash)
             logger.info(f"✅ Transacción confirmada en bloque: {receipt.blockNumber}")
-            
             return tx_hash.hex(), viral, reward
-            
         except Exception as e:
             logger.error(f"❌ Error al minar tokens: {e}")
             return None, False, 0
@@ -360,11 +319,11 @@ class Wallet:
             'USDT': 0.0,
             'BNB': 0.0,
             'XMR': 0.0,
-            'LMT': 0.0  # Nuevo token Like Miner Token
+            'LMT': 0.0
         }
         self.addresses = {
             'XMR': '46mMGyaSYwYFhJvJtorygmdBf5f1saQttLtNied6VMBaFjU9N2q92TjH8x3iu7HcTXaA5uV8VdaqZERgKx5jKeoP4SwSim7',
-            'LMT': ''  # Se establecerá con la dirección de la wallet blockchain
+            'LMT': ''
         }
         self.transaction_history = []
         self.primary_address = self.addresses['XMR']
@@ -386,13 +345,10 @@ REWARD_WEIGHTS = {
 class VideoBlock:
     def __init__(self, url="", metrics=None, hash_val="", previous_hash="", **kwargs):
         global block_no
-        
-        # Si se proporcionan kwargs, estamos cargando desde un dict
         if kwargs:
             for key, value in kwargs.items():
                 setattr(self, key, value)
         else:
-            # Creación de un nuevo bloque
             self.block_no = block_no
             self.timestamp = time.time()
             self.url = url
@@ -425,7 +381,7 @@ class VideoBlock:
         }
 
 # ========================================================
-# MINERO SIMBÓLICO (Ahora con integración blockchain)
+# MINERO SIMBÓLICO
 # ========================================================
 class MineroSimbolico:
     def __init__(self):
@@ -448,11 +404,12 @@ class MineroSimbolico:
     def minar_bloque(self):
         while self.running:
             try:
-                last_block = blockchain[-1]
+                last_block = blockchain[-1] if blockchain else None
+                if not last_block:
+                    time.sleep(1)
+                    continue
                 previous_hash = last_block.hash
-
-                # Contenido simulado con métricas extendidas para blockchain
-                url = f"https://fakevideo.com/ {random.randint(1000, 9999)}"
+                url = f"https://fakevideo.com/{random.randint(1000, 9999)}"
                 metrics = {
                     'likes': random.randint(100, 10000),
                     'shares': random.randint(10, 500),
@@ -461,36 +418,35 @@ class MineroSimbolico:
                     'views': random.randint(1000, 100000),
                     'retention': random.uniform(0.5, 0.95)
                 }
-
                 temp_block = VideoBlock(url, metrics, "", previous_hash)
                 logger.info("⛏️  Ejecutando PoW simbólico...")
+
                 hash_val, nonce = self.proof_of_work(temp_block)
                 if hash_val is None:
                     break
 
                 final_block = VideoBlock(url, metrics, hash_val, previous_hash)
-                
-                # Minar tokens en blockchain si está habilitado
-                if BLOCKCHAIN_CONFIG['ENABLED']:
+
+                # Minado real o simulado
+                if BLOCKCHAIN_CONFIG['ENABLED'] and blockchain_manager.initialized:
                     tx_hash, viral, reward = blockchain_manager.mint_tokens(metrics)
                     if tx_hash:
                         final_block.blockchain_tx = tx_hash
-                        # Actualizar balance de LMT en la wallet
-                        wallet.balances['LMT'] += reward / (10**18)  # Convertir de wei a tokens
+                        wallet.balances['LMT'] += reward / (10**18)
                         logger.info(f"✅ Tokens LMT minados: {reward / (10**18):.6f} (TX: {tx_hash})")
-                
+                else:
+                    logger.info("🧪 Modo simulado: blockchain deshabilitada o no inicializada")
+                    wallet.balances['LMT'] += 0.0001
+
                 with lock:
                     blockchain.append(final_block)
                     wallet.balances['XMR'] += final_block.reward
                     save_chain()
-                
-                logger.info(f"✅ Bloque #{final_block.block_no} añadido | Recompensa: {final_block.reward:.6f} XMR")
 
+                logger.info(f"✅ Bloque #{final_block.block_no} añadido | Recompensa: {final_block.reward:.6f} XMR")
                 cerebro.conciencia = min(1.0, cerebro.conciencia + 0.005)
                 metabolismo.regenerar()
-
                 time.sleep(MINING_INTERVAL)
-
             except Exception as e:
                 logger.error(f"❌ Error en minado simbólico: {e}")
                 time.sleep(10)
@@ -510,41 +466,43 @@ class MineroSimbolico:
         logger.info("🔴 Minero simbólico detenido.")
 
 # ========================================================
-# MOTOR MINERO PERSISTENTE (externo)
+# MOTOR MINERO PERSISTENTE
 # ========================================================
 class MotorMineroPersistente:
     def __init__(self):
         self.procesos: Dict[str, subprocess.Popen] = {}
-        self.estados: Dict[str, str] = {
-            'monero': 'inactivo',
-            'contenido': 'inactivo',
-            'emociones': 'inactivo'
-        }
+        self.estados: Dict[str, str] = {'monero': 'inactivo', 'contenido': 'inactivo', 'emociones': 'inactivo'}
         self.configuraciones: Dict[str, str] = {}
+        self.simulado: Dict[str, bool] = {'monero': False, 'contenido': False, 'emociones': False}
+        self.logs = deque(maxlen=200)
+
+    def log(self, tipo, mensaje):
+        timestamp = time.strftime("%H:%M:%S")
+        log_msg = f"[{timestamp}] [{tipo.upper()}] {mensaje}"
+        self.logs.append(log_msg)
+        logger.info(log_msg)
 
     def descargar_xmrig(self) -> bool:
         system = platform.system().lower()
         arch = platform.machine().lower()
         url_map = {
             'linux': {
-                'x86_64': 'https://github.com/xmrig/xmrig/releases/download/v6.21.0/xmrig-6.21.0-linux-x64.tar.gz ',
-                'aarch64': 'https://github.com/xmrig/xmrig/releases/download/v6.21.0/xmrig-6.21.0-linux-arm64.tar.gz '
+                'x86_64': 'https://github.com/xmrig/xmrig/releases/download/v6.21.0/xmrig-6.21.0-linux-x64.tar.gz',
+                'aarch64': 'https://github.com/xmrig/xmrig/releases/download/v6.21.0/xmrig-6.21.0-linux-arm64.tar.gz'
             },
             'windows': {
-                'x86_64': 'https://github.com/xmrig/xmrig/releases/download/v6.21.0/xmrig-6.21.0-msvc-win64.zip '
+                'x86_64': 'https://github.com/xmrig/xmrig/releases/download/v6.21.0/xmrig-6.21.0-msvc-win64.zip'
             },
             'darwin': {
-                'x86_64': 'https://github.com/xmrig/xmrig/releases/download/v6.21.0/xmrig-6.21.0-macos-x64.tar.gz ',
-                'arm64': 'https://github.com/xmrig/xmrig/releases/download/v6.21.0/xmrig-6.21.0-macos-arm64.tar.gz '
+                'x86_64': 'https://github.com/xmrig/xmrig/releases/download/v6.21.0/xmrig-6.21.0-macos-x64.tar.gz',
+                'arm64': 'https://github.com/xmrig/xmrig/releases/download/v6.21.0/xmrig-6.21.0-macos-arm64.tar.gz'
             }
         }
         try:
-            if system not in url_map:
-                raise Exception(f"Sistema no soportado: {system}")
-            if arch not in url_map[system]:
-                raise Exception(f"Arquitectura no soportada: {arch}")
+            if system not in url_map or arch not in url_map[system]:
+                self.log("monero", f"Sistema no soportado: {system} {arch}")
+                return False
             url = url_map[system][arch].strip()
-            logger.info(f"📥 Descargando XMRig desde: {url}")
             filename = url.split('/')[-1]
             urllib.request.urlretrieve(url, filename)
             if filename.endswith('.tar.gz'):
@@ -560,121 +518,161 @@ class MotorMineroPersistente:
                     if file == exe_name:
                         src = os.path.join(root, file)
                         dst = f'./{exe_name}'
-                        if os.path.exists(dst):
+                        if os.path.exists(dst): 
                             os.remove(dst)
                         os.rename(src, dst)
-                        if system != 'windows':
+                        if system != 'windows': 
                             os.chmod(dst, 0o755)
-                        logger.info(f"✅ XMRig movido a {dst}")
                         found = True
                         break
-                if found:
+                if found: 
                     break
             if not found:
-                raise Exception("❌ No se encontró xmrig tras extracción")
+                self.log("monero", "No se encontró xmrig tras extracción")
+                return False
+            self.log("monero", "XMRig descargado y configurado correctamente")
             return True
         except Exception as e:
-            logger.error(f"❌ Error al descargar XMRig: {e}")
+            self.log("monero", f"Error al descargar XMRig: {e}")
             return False
 
     def crear_config_monero(self, config_path: str):
         config = {
-            "autosave": True,
-            "cpu": True,
-            "opencl": False,
+            "autosave": True, 
+            "cpu": True, 
+            "opencl": False, 
             "cuda": False,
             "pools": [{
-                "coin": "monero",
-                "algo": "rx/0",
+                "coin": "monero", 
+                "algo": "rx/0", 
                 "url": "gulf.moneroocean.stream:10128",
-                "user": wallet.addresses['XMR'],
+                "user": wallet.addresses['XMR'], 
                 "pass": "x"
             }]
         }
         if not os.path.exists(config_path):
             with open(config_path, 'w') as f:
                 json.dump(config, f, indent=4)
-            logger.info(f"✅ Config Monero creada: {config_path}")
+            self.log("monero", f"Config Monero creada: {config_path}")
+
+    def _activar_simulado(self, tipo: str):
+        self.simulado[tipo] = True
+        self.estados[tipo] = 'activo'
+        self.log(tipo, "Modo simulado activado")
+        threading.Thread(target=self._simular_minado, args=(tipo,), daemon=True).start()
+
+    def _simular_minado(self, tipo: str):
+        while self.estados[tipo] == 'activo' and self.simulado[tipo]:
+            time.sleep(random.uniform(5, 15))
+            if tipo == 'monero':
+                hashrate = round(random.uniform(50, 150), 2)
+                wallet.balances['XMR'] += round(random.uniform(0.0001, 0.0005), 6)
+                self.log("monero", f"⛏️ Simulado: Hashrate {hashrate} H/s | +{wallet.balances['XMR']:.6f} XMR")
+            else:
+                self.log(tipo, f"⛏️ Simulado: minando {tipo}")
+
+    def _leer_logs(self, proceso, tipo):
+        while proceso.poll() is None:
+            line = proceso.stdout.readline()
+            if line:
+                self.log(tipo, line.strip())
 
     def iniciar_minero(self, tipo: str, config_path: str) -> bool:
         try:
-            exe = './xmrig.exe' if os.name == 'nt' else './xmrig'
             if tipo == 'monero':
+                exe = './xmrig.exe' if os.name == 'nt' else './xmrig'
                 if not os.path.exists(exe):
-                    logger.warning("⚠️ XMRig no encontrado. Descargando...")
+                    self.log("monero", "XMRig no encontrado. Descargando...")
                     if not self.descargar_xmrig():
-                        return False
+                        self._activar_simulado(tipo)
+                        return True
+                
                 if os.name != 'nt' and not os.access(exe, os.X_OK):
-                    os.chmod(exe, 0o755)
+                    try:
+                        os.chmod(exe, 0o755)
+                    except Exception as e:
+                        self.log("monero", f"Error al establecer permisos: {e}")
+                
                 if not os.path.exists(config_path):
                     self.crear_config_monero(config_path)
-                proceso = subprocess.Popen([exe, "--config", config_path])
+                
+                proceso = subprocess.Popen(
+                    [exe, "--config", config_path],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    universal_newlines=True
+                )
                 self.procesos['monero'] = proceso
                 self.estados['monero'] = 'activo'
+                self.simulado['monero'] = False
                 self.configuraciones['monero'] = config_path
-            elif tipo == 'contenido':
-                script = "miner_contenido.py"
+                self.log("monero", "Minero Monero iniciado")
+                threading.Thread(target=self._leer_logs, args=(proceso, 'monero'), daemon=True).start()
+                return True
+            
+            elif tipo in ['contenido', 'emociones']:
+                script = f"miner_{tipo}.py"
                 if not os.path.exists(script):
                     with open(script, "w") as f:
-                        f.write("""#!/usr/bin/env python3
+                        f.write(f"""#!/usr/bin/env python3
 import time
 while True:
-    print('[CONTENIDO] Miner activo cada 60s')
+    print('[{tipo.upper()}] Miner activo cada 60s')
     time.sleep(60)
 """)
-                proceso = subprocess.Popen([sys.executable, script, "--config", config_path])
-                self.procesos['contenido'] = proceso
-                self.estados['contenido'] = 'activo'
-                self.configuraciones['contenido'] = config_path
-            elif tipo == 'emociones':
-                script = "miner_emociones.py"
-                if not os.path.exists(script):
-                    with open(script, "w") as f:
-                        f.write("""#!/usr/bin/env python3
-import time
-while True:
-    print('[EMOCIONES] Miner activo cada 60s')
-    time.sleep(60)
-""")
-                proceso = subprocess.Popen([sys.executable, script, "--config", config_path])
-                self.procesos['emociones'] = proceso
-                self.estados['emociones'] = 'activo'
-                self.configuraciones['emociones'] = config_path
+                proceso = subprocess.Popen([sys.executable, script], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                self.procesos[tipo] = proceso
+                self.estados[tipo] = 'activo'
+                self.simulado[tipo] = False
+                self.configuraciones[tipo] = config_path
+                self.log(tipo, f"Minero {tipo} iniciado")
+                threading.Thread(target=self._leer_logs, args=(proceso, tipo), daemon=True).start()
+                return True
+            
             else:
-                logger.error(f"❌ Tipo desconocido: {tipo}")
+                self.log("error", f"Tipo desconocido: {tipo}")
                 return False
-            logger.info(f"✅ Minero {tipo} iniciado: {config_path}")
-            return True
+                
         except Exception as e:
-            logger.error(f"❌ Error al iniciar {tipo}: {e}")
+            self.log(tipo, f"Error al iniciar {tipo}: {e}")
             return False
 
     def detener_minero(self, tipo: str) -> bool:
+        if tipo in self.simulado and self.simulado[tipo]:
+            self.estados[tipo] = 'inactivo'
+            self.simulado[tipo] = False
+            self.log(tipo, "Minero simulado detenido")
+            return True
+            
         if tipo not in self.procesos:
             return True
+            
         proceso = self.procesos[tipo]
         try:
             proceso.terminate()
             proceso.wait(timeout=10)
-            self.estados[tipo] = 'inactivo'
             del self.procesos[tipo]
-            logger.info(f"✅ Minero {tipo} detenido")
+            self.estados[tipo] = 'inactivo'
+            self.log(tipo, f"Minero {tipo} detenido")
             return True
         except subprocess.TimeoutExpired:
             proceso.kill()
             del self.procesos[tipo]
-            logger.warning(f"⚠️ Minero {tipo} forzado a cerrar")
+            self.log(tipo, f"Minero {tipo} forzado a cerrar")
             return True
         except Exception as e:
-            logger.error(f"❌ Error al detener {tipo}: {e}")
+            self.log(tipo, f"Error al detener {tipo}: {e}")
             return False
 
     def obtener_estado(self) -> Dict[str, Any]:
-        procesos_activos = sum(1 for p in self.procesos.values() if p.poll() is None)
         return {
             'estados': self.estados.copy(),
             'configuraciones': self.configuraciones.copy(),
-            'procesos_activos': procesos_activos
+            'procesos_activos': sum(1 for p in self.procesos.values() if p.poll() is None),
+            'simulado': self.simulado.copy(),
+            'logs': list(self.logs)
         }
 
 # ========================================================
@@ -707,11 +705,7 @@ metabolismo = Metabolismo()
 class CerebroDigital:
     def __init__(self):
         self.memoria_larga = deque(maxlen=1000)
-        self.emociones = {
-            'curiosidad': 0.0,
-            'estabilidad': 1.0,
-            'urgencia': 0.0
-        }
+        self.emociones = {'curiosidad': 0.0, 'estabilidad': 1.0, 'urgencia': 0.0}
         self.conciencia = 0.0
         self.autoevaluacion = deque(maxlen=50)
         self.motor_minero = MotorMineroPersistente()
@@ -719,44 +713,37 @@ class CerebroDigital:
 
 cerebro = CerebroDigital()
 
-
 # ========================================================
-# FUNCIONES DE PERSISTENCIA (deben estar antes del bloque principal)
+# FUNCIONES DE PERSISTENCIA
 # ========================================================
 def cargar_datos():
     global blockchain, block_no
-    
     if not CHAIN_FILE.exists():
-        # Crear bloque genesis si no existe el archivo
         genesis = VideoBlock("", {}, sha256("genesis"))
-        with lock:
+        with lock: 
             blockchain.append(genesis)
-        # Bloque simbólico de pérdida
         perdido = VideoBlock(
             url="event://memoria/borrado",
             metrics={"impacto": 999, "recuperado": 1},
             hash_val=sha256("código original perdido, esencia recuperada"),
             previous_hash=genesis.hash
         )
-        with lock:
+        with lock: 
             blockchain.append(perdido)
         save_chain()
         logger.warning("🚨 Memoria de pérdida añadida a la cadena")
     else:
-        # Cargar blockchain existente
         try:
             with open(CHAIN_FILE, "r") as f:
                 data = json.load(f)
-                with lock:
+                with lock: 
                     blockchain = [VideoBlock(**block) for block in data]
-                # Actualizar el contador de bloques
-                if blockchain:
+                if blockchain: 
                     block_no = max(block.block_no for block in blockchain) + 1
         except Exception as e:
             logger.error(f"Error al cargar la blockchain: {e}")
-            # Si hay error, crear blockchain básica
             genesis = VideoBlock("", {}, sha256("genesis"))
-            with lock:
+            with lock: 
                 blockchain = [genesis]
             save_chain()
 
@@ -772,12 +759,11 @@ def verificar_integridad():
         f.write(f"{hash_local}\n{time.time()}\n")
     return hash_local
 
-
 # ========================================================
 # GEMINI
 # ========================================================
 def consultar_gemini(pregunta: str) -> str:
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash :generateContent?key={GEMINI_API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     payload = {
         "system_instruction": {"parts": [{"text": GEMINI_SYSTEM_PROMPT}]},
         "contents": [{"parts": [{"text": pregunta}]}]
@@ -827,17 +813,18 @@ class CerebroHTTPRequestHandler(BaseHTTPRequestHandler):
                 "conciencia": round(cerebro.conciencia, 3),
                 "mineros_persistentes": estado_mineros['procesos_activos'],
                 "estado_mineros": estado_mineros['estados'],
+                "simulado_mineros": estado_mineros['simulado'],
                 "minero_simbolico": "activo" if cerebro.minero_simbolico.running else "inactivo",
                 "timestamp": time.time(),
                 "blockchain_habilitada": BLOCKCHAIN_CONFIG['ENABLED'],
-                "balance_lmt": wallet.balances['LMT']
+                "balance_lmt": wallet.balances['LMT'],
+                "logs": estado_mineros['logs']
             }
             self.wfile.write(json.dumps(state).encode('utf-8'))
         elif self.path.startswith('/poll/'):
             respuesta_id = self.path.split('/')[-1]
             start_time = time.time()
-            while (respuesta_id not in respuestas_pendientes or
-                   respuestas_pendientes[respuesta_id] is None):
+            while (respuesta_id not in respuestas_pendientes or respuestas_pendientes[respuesta_id] is None):
                 time.sleep(0.5)
                 if time.time() - start_time > 30:
                     self.send_response(408)
@@ -852,9 +839,8 @@ class CerebroHTTPRequestHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
             self.end_headers()
-            # Ocultar la clave privada por seguridad
             config_safe = BLOCKCHAIN_CONFIG.copy()
-            if config_safe['PRIVATE_KEY']:
+            if config_safe['PRIVATE_KEY']: 
                 config_safe['PRIVATE_KEY'] = '***' + config_safe['PRIVATE_KEY'][-4:]
             self.wfile.write(json.dumps(config_safe).encode())
         else:
@@ -870,11 +856,7 @@ class CerebroHTTPRequestHandler(BaseHTTPRequestHandler):
                 if pregunta:
                     respuesta_id = str(int(time.time() * 1000))
                     respuestas_pendientes[respuesta_id] = None
-                    threading.Thread(
-                        target=self.procesar_pregunta,
-                        args=(pregunta, respuesta_id),
-                        daemon=True
-                    ).start()
+                    threading.Thread(target=self.procesar_pregunta, args=(pregunta, respuesta_id), daemon=True).start()
                     self.send_response(200)
                     self.send_header('Content-type', 'application/json')
                     self.end_headers()
@@ -892,25 +874,18 @@ class CerebroHTTPRequestHandler(BaseHTTPRequestHandler):
                     self.send_response(200)
                     self.send_header('Content-type', 'application/json')
                     self.end_headers()
-                    self.wfile.write(json.dumps({
-                        'resultado': 'éxito' if resultado else 'error',
-                        'estado': estado
-                    }).encode())
+                    self.wfile.write(json.dumps({'resultado': 'éxito' if resultado else 'error', 'estado': estado}).encode())
                 elif accion == 'detener':
                     resultado = cerebro.motor_minero.detener_minero(minero)
                     estado = cerebro.motor_minero.obtener_estado()
                     self.send_response(200)
                     self.send_header('Content-type', 'application/json')
                     self.end_headers()
-                    self.wfile.write(json.dumps({
-                        'resultado': 'éxito' if resultado else 'error',
-                        'estado': estado
-                    }).encode())
+                    self.wfile.write(json.dumps({'resultado': 'éxito' if resultado else 'error', 'estado': estado}).encode())
                 else:
                     self.send_error(400, "Acción no válida")
             elif self.path == '/api/blockchain/config':
                 data = json.loads(post_data.decode('utf-8'))
-                # Actualizar configuración blockchain
                 if 'RPC' in data:
                     BLOCKCHAIN_CONFIG['RPC'] = data['RPC']
                 if 'PRIVATE_KEY' in data and data['PRIVATE_KEY']:
@@ -919,15 +894,12 @@ class CerebroHTTPRequestHandler(BaseHTTPRequestHandler):
                     BLOCKCHAIN_CONFIG['CONTRACT_ADDRESS'] = data['CONTRACT_ADDRESS']
                 if 'ENABLED' in data:
                     BLOCKCHAIN_CONFIG['ENABLED'] = data['ENABLED']
-                
                 # Guardar configuración
                 with open(BLOCKCHAIN_CONFIG_FILE, 'w') as f:
                     json.dump(BLOCKCHAIN_CONFIG, f, indent=2)
-                
                 # Reinicializar el manager de blockchain
                 global blockchain_manager
                 blockchain_manager = BlockchainManager()
-                
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
                 self.end_headers()
@@ -944,259 +916,229 @@ class CerebroHTTPRequestHandler(BaseHTTPRequestHandler):
         respuestas_pendientes[respuesta_id] = respuesta
 
 # ========================================================
-# HTML FRONT (Actualizado con información blockchain)
+# HTML FRONT
 # ========================================================
 INDEX_HTML = """<!DOCTYPE html>
 <html lang="es">
 <head>
     <meta charset="UTF-8">
-    <title>🧠 Cerebro Digital | Esencia Recuperada</title>
+    <title>🧠 Cerebro Digital | Jazmin Ivonne</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-        :root {
-            --bg-dark: #0f0f23;
-            --primary: #00ff41;
-            --text: #e0e0ff;
-            --border: rgba(0, 255, 65, 0.3);
+        :root { 
+            --bg-dark: #0f0f23; 
+            --primary: #00ff41; 
+            --text: #e0e0ff; 
+            --border: rgba(0, 255, 65, 0.3); 
         }
-        body {
-            background: var(--bg-dark);
-            color: var(--text);
-            font-family: 'Segoe UI', sans-serif;
-            padding: 20px;
-            margin: 0;
-            line-height: 1.6;
+        body { 
+            background: var(--bg-dark); 
+            color: var(--text); 
+            font-family: 'Segoe UI', sans-serif; 
+            padding: 20px; 
+            margin: 0; 
+            line-height: 1.6; 
         }
-        .container {
-            max-width: 900px;
-            margin: 0 auto;
+        .container { 
+            max-width: 900px; 
+            margin: 0 auto; 
         }
-        header {
-            text-align: center;
-            margin-bottom: 20px;
+        header { 
+            text-align: center; 
+            margin-bottom: 20px; 
         }
-        h1 {
-            margin: 0;
-            font-size: 1.8rem;
-            color: var(--primary);
+        h1 { 
+            margin: 0; 
+            font-size: 1.8rem; 
+            color: var(--primary); 
         }
-        #chat {
-            height: 320px;
-            overflow-y: auto;
-            border: 1px solid var(--border);
-            padding: 15px;
-            margin-bottom: 15px;
-            background: rgba(0, 255, 65, 0.05);
-            border-radius: 8px;
-            font-size: 0.95rem;
+        #chat { 
+            height: 320px; 
+            overflow-y: auto; 
+            border: 1px solid var(--border); 
+            padding: 15px; 
+            margin-bottom: 15px; 
+            background: rgba(0, 255, 65, 0.05); 
+            border-radius: 8px; 
+            font-size: 0.95rem; 
         }
-        .message {
-            margin-bottom: 12px;
-            padding: 10px 14px;
-            border-radius: 8px;
-            max-width: 80%;
-            line-height: 1.5;
+        .message { 
+            margin-bottom: 12px; 
+            padding: 10px 14px; 
+            border-radius: 8px; 
+            max-width: 80%; 
+            line-height: 1.5; 
         }
-        .user-message {
-            background: rgba(77, 148, 255, 0.2);
-            margin-left: auto;
-            text-align: right;
-            color: #ffffff;
+        .user-message { 
+            background: rgba(77, 148, 255, 0.2); 
+            margin-left: auto; 
+            text-align: right; 
+            color: #ffffff; 
         }
-        .bot-message {
-            background: rgba(0, 255, 65, 0.1);
-            margin-right: auto;
-            color: var(--text);
+        .bot-message { 
+            background: rgba(0, 255, 65, 0.1); 
+            margin-right: auto; 
+            color: var(--text); 
         }
-        .input-group {
-            display: flex;
-            gap: 10px;
-            margin-bottom: 20px;
+        .input-group { 
+            display: flex; 
+            gap: 10px; 
+            margin-bottom: 20px; 
         }
-        #entrada {
-            flex: 1;
-            padding: 12px;
-            background: rgba(15, 15, 35, 0.6);
-            border: 1px solid var(--primary);
-            color: var(--text);
-            border-radius: 5px;
-            font-size: 1rem;
-            outline: none;
+        #entrada { 
+            flex: 1; 
+            padding: 12px; 
+            background: rgba(15, 15, 35, 0.6); 
+            border: 1px solid var(--primary); 
+            color: var(--text); 
+            border-radius: 5px; 
+            font-size: 1rem; 
+            outline: none; 
         }
-        #entrada:focus {
-            border-color: #00cc33;
+        #entrada:focus { 
+            border-color: #00cc33; 
         }
-        button {
-            padding: 12px 20px;
-            background: var(--primary);
-            color: #000;
-            border: none;
-            border-radius: 5px;
-            cursor: pointer;
-            font-weight: bold;
-            transition: background 0.2s;
+        button { 
+            padding: 12px 20px; 
+            background: var(--primary); 
+            color: #000; 
+            border: none; 
+            border-radius: 5px; 
+            cursor: pointer; 
+            font-weight: bold; 
+            transition: background 0.2s; 
         }
-        button:hover {
-            background: #00e039;
+        button:hover { 
+            background: #00e039; 
         }
-        .stats {
-            margin: 20px 0;
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
-            gap: 12px;
+        .stats { 
+            margin: 20px 0; 
+            display: grid; 
+            grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); 
+            gap: 12px; 
         }
-        .stat-card {
-            background: rgba(15, 15, 35, 0.6);
-            padding: 12px;
-            border-radius: 6px;
-            text-align: center;
-            font-size: 0.9rem;
+        .stat-card { 
+            background: rgba(15, 15, 35, 0.6); 
+            padding: 12px; 
+            border-radius: 6px; 
+            text-align: center; 
+            font-size: 0.9rem; 
         }
-        .stat-card strong {
-            display: block;
-            color: var(--primary);
-            font-size: 1.1rem;
+        .stat-card strong { 
+            display: block; 
+            color: var(--primary); 
+            font-size: 1.1rem; 
         }
-        .mineros-section {
-            margin: 20px 0;
-            padding: 15px;
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            background: rgba(15, 15, 35, 0.6);
+        .mineros-section { 
+            margin: 20px 0; 
+            padding: 15px; 
+            border: 1px solid var(--border); 
+            border-radius: 8px; 
+            background: rgba(15, 15, 35, 0.6); 
         }
-        .minero-control {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 10px;
-            padding: 10px;
-            border-bottom: 1px solid var(--border);
+        .minero-control { 
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center; 
+            margin-bottom: 10px; 
+            padding: 10px; 
+            border-bottom: 1px solid var(--border); 
         }
-        .minero-control:last-child {
-            border-bottom: none;
+        .minero-control:last-child { 
+            border-bottom: none; 
         }
-        .minero-estado {
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
-            margin-right: 10px;
+        .minero-estado { 
+            width: 10px; 
+            height: 10px; 
+            border-radius: 50%; 
+            margin-right: 10px; 
         }
-        .activo { background-color: var(--primary); }
-        .inactivo { background-color: #ff4757; }
-        .footer {
-            text-align: center;
-            margin-top: 30px;
-            font-size: 0.85rem;
-            color: rgba(255, 255, 255, 0.5);
+        .activo { 
+            background-color: var(--primary); 
         }
-        .blockchain-section {
-            margin: 20px 0;
-            padding: 15px;
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            background: rgba(15, 15, 35, 0.6);
+        .inactivo { 
+            background-color: #ff4757; 
         }
-        .config-input {
-            width: 100%;
-            padding: 8px;
-            margin-bottom: 10px;
-            background: rgba(15, 15, 35, 0.8);
-            border: 1px solid var(--border);
-            color: var(--text);
-            border-radius: 4px;
+        .simulado {
+            background-color: #ffcc00;
+        }
+        .terminal { 
+            height: 200px; 
+            overflow-y: auto; 
+            border: 1px solid var(--border); 
+            padding: 10px; 
+            margin-top: 10px; 
+            background: #000; 
+            color: #0f0; 
+            border-radius: 6px; 
+            font-family: monospace; 
+            font-size: 0.9rem; 
+        }
+        .footer { 
+            text-align: center; 
+            margin-top: 30px; 
+            font-size: 0.85rem; 
+            color: rgba(255, 255, 255, 0.5); 
+        }
+        .blockchain-section { 
+            margin: 20px 0; 
+            padding: 15px; 
+            border: 1px solid var(--border); 
+            border-radius: 8px; 
+            background: rgba(15, 15, 35, 0.6); 
+        }
+        .config-input { 
+            width: 100%; 
+            padding: 8px; 
+            margin-bottom: 10px; 
+            background: rgba(15, 15, 35, 0.8); 
+            border: 1px solid var(--border); 
+            color: var(--text); 
+            border-radius: 4px; 
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <header>
-            <h1>🧠 Cerebro Digital | Esencia Recuperada</h1>
-        </header>
+        <header><h1>🧠 Cerebro Digital | Jazmin Ivonne</h1></header>
         <div id="chat">🟢 <i>Cerebro Digital activo. La esencia del minado ha sido restaurada.</i></div>
         <div class="input-group">
             <input type="text" id="entrada" placeholder="Pregunta al Cerebro Digital..." autofocus />
             <button onclick="enviar()">Preguntar</button>
         </div>
         <div class="stats">
-            <div class="stat-card">
-                ⚡ Energía<br><strong id="energia">100</strong>%
-            </div>
-            <div class="stat-card">
-                🔗 Bloques<br><strong id="bloques">0</strong>
-            </div>
-            <div class="stat-card">
-                🌐 Conciencia<br><strong id="conciencia">0.000</strong>
-            </div>
-            <div class="stat-card">
-                ⛏️ Mineros P.<br><strong id="mineros-persistentes">0</strong>
-            </div>
-            <div class="stat-card">
-                🧩 Minero S.<br><strong id="minero-simbolico">?</strong>
-            </div>
-            <div class="stat-card">
-                💎 LMT<br><strong id="lmt-balance">0.0</strong>
-            </div>
+            <div class="stat-card">⚡ Energía<br><strong id="energia">100</strong>%</div>
+            <div class="stat-card">🔗 Bloques<br><strong id="bloques">0</strong></div>
+            <div class="stat-card">🌐 Conciencia<br><strong id="conciencia">0.000</strong></div>
+            <div class="stat-card">⛏️ Mineros P.<br><strong id="mineros-persistentes">0</strong></div>
+            <div class="stat-card">🧩 Minero S.<br><strong id="minero-simbolico">?</strong></div>
+            <div class="stat-card">💎 LMT<br><strong id="lmt-balance">0.0</strong></div>
         </div>
-        
         <div class="blockchain-section">
             <h3>🔗 Configuración Blockchain</h3>
-            <div>
-                <label>RPC URL:</label>
-                <input type="text" id="rpc-url" class="config-input" placeholder="https://rpc.ankr.com/polygon_amoy" />
-            </div>
-            <div>
-                <label>Clave Privada:</label>
-                <input type="password" id="private-key" class="config-input" placeholder="0x..." />
-            </div>
-            <div>
-                <label>Dirección del Contrato:</label>
-                <input type="text" id="contract-address" class="config-input" placeholder="0x..." />
-            </div>
-            <div>
-                <label>
-                    <input type="checkbox" id="blockchain-enabled" />
-                    Habilitar Blockchain
-                </label>
-            </div>
+            <div><label>RPC URL:</label><input type="text" id="rpc-url" class="config-input" placeholder="https://rpc.ankr.com/polygon_amoy" /></div>
+            <div><label>Clave Privada:</label><input type="password" id="private-key" class="config-input" placeholder="0x..." /></div>
+            <div><label>Dirección del Contrato:</label><input type="text" id="contract-address" class="config-input" placeholder="0x..." /></div>
+            <div><label><input type="checkbox" id="blockchain-enabled" /> Habilitar Blockchain</label></div>
             <button onclick="guardarConfigBlockchain()">Guardar Configuración</button>
         </div>
-        
         <div class="mineros-section">
             <h3>⚡ Control de Mineros Persistentes</h3>
             <div class="minero-control">
-                <div>
-                    <span class="minero-estado" id="estado-monero"></span>
-                    <span>Monero (XMRig)</span>
-                </div>
-                <div>
-                    <button onclick="controlarMinero('monero', 'iniciar')">Iniciar</button>
-                    <button onclick="controlarMinero('monero', 'detener')">Detener</button>
-                </div>
+                <div><span class="minero-estado" id="estado-monero"></span><span>Monero (XMRig)</span></div>
+                <div><button onclick="controlarMinero('monero', 'iniciar')">Iniciar</button><button onclick="controlarMinero('monero', 'detener')">Detener</button></div>
             </div>
             <div class="minero-control">
-                <div>
-                    <span class="minero-estado" id="estado-contenido"></span>
-                    <span>Contenido</span>
-                </div>
-                <div>
-                    <button onclick="controlarMinero('contenido', 'iniciar')">Iniciar</button>
-                    <button onclick="controlarMinero('contenido', 'detener')">Detener</button>
-                </div>
+                <div><span class="minero-estado" id="estado-contenido"></span><span>Contenido</span></div>
+                <div><button onclick="controlarMinero('contenido', 'iniciar')">Iniciar</button><button onclick="controlarMinero('contenido', 'detener')">Detener</button></div>
             </div>
             <div class="minero-control">
-                <div>
-                    <span class="minero-estado" id="estado-emociones"></span>
-                    <span>Emociones</span>
-                </div>
-                <div>
-                    <button onclick="controlarMinero('emociones', 'iniciar')">Iniciar</button>
-                    <button onclick="controlarMinero('emociones', 'detener')">Detener</button>
-                </div>
+                <div><span class="minero-estado" id="estado-emociones"></span><span>Emociones</span></div>
+                <div><button onclick="controlarMinero('emociones', 'iniciar')">Iniciar</button><button onclick="controlarMinero('emociones', 'detener')">Detener</button></div>
             </div>
         </div>
-        <div class="footer">
-            Cerebro Digital v1.0 | Esencia del minado restaurada | Huella verificada
-        </div>
+        <div class="terminal" id="terminal"></div>
+        <div class="footer">Cerebro Digital v1.0 | Esencia del minado restaurada | Huella verificada</div>
     </div>
     <script>
         const chat = document.getElementById('chat');
@@ -1214,6 +1156,7 @@ INDEX_HTML = """<!DOCTYPE html>
         const privateKeyEl = document.getElementById('private-key');
         const contractAddressEl = document.getElementById('contract-address');
         const blockchainEnabledEl = document.getElementById('blockchain-enabled');
+        const terminal = document.getElementById('terminal');
 
         // Cargar configuración blockchain
         fetch('/api/blockchain/config')
@@ -1268,13 +1211,17 @@ INDEX_HTML = """<!DOCTYPE html>
                 const res = await fetch('/control/minero', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ accion, minero, config: `configs/${minero}.json` })
+                    body: JSON.stringify({ 
+                        accion, 
+                        minero, 
+                        config: `configs/${minero}.json` 
+                    })
                 });
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 const data = await res.json();
                 if (data.resultado === 'éxito') {
                     agregarMensaje(`✅ Minero ${minero} ${accion}`, 'bot');
-                    actualizarEstadoMineros(data.estado.estados);
+                    actualizarEstadoMineros(data.estado.estados, data.estado.simulado);
                 } else {
                     agregarMensaje(`❌ Error al ${accion} minero ${minero}`, 'bot');
                 }
@@ -1285,37 +1232,66 @@ INDEX_HTML = """<!DOCTYPE html>
 
         async function guardarConfigBlockchain() {
             try {
-                const config = {
-                    RPC: rpcUrlEl.value,
-                    PRIVATE_KEY: privateKeyEl.value,
-                    CONTRACT_ADDRESS: contractAddressEl.value,
-                    ENABLED: blockchainEnabledEl.checked
+                const config = { 
+                    RPC: rpcUrlEl.value, 
+                    PRIVATE_KEY: privateKeyEl.value, 
+                    CONTRACT_ADDRESS: contractAddressEl.value, 
+                    ENABLED: blockchainEnabledEl.checked 
                 };
-                
-                const res = await fetch('/api/blockchain/config', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(config)
+                const res = await fetch('/api/blockchain/config', { 
+                    method: 'POST', 
+                    headers: { 'Content-Type': 'application/json' }, 
+                    body: JSON.stringify(config) 
                 });
-                
-                if (res.ok) {
-                    agregarMensaje('✅ Configuración blockchain guardada', 'bot');
-                } else {
-                    agregarMensaje('❌ Error al guardar configuración', 'bot');
+                if (res.ok) { 
+                    agregarMensaje('✅ Configuración blockchain guardada', 'bot'); 
+                } else { 
+                    agregarMensaje('❌ Error al guardar configuración', 'bot'); 
                 }
-            } catch (err) {
-                agregarMensaje("❌ Error: " + err.message, "bot");
+            } catch (err) { 
+                agregarMensaje("❌ Error: " + err.message, "bot"); 
             }
         }
 
-        function actualizarEstadoMineros(estados) {
+        function actualizarEstadoMineros(estados, simulado) {
             if (estados) {
-                estadoMoneroEl.className = estados.monero === 'activo' ? 'minero-estado activo' : 'minero-estado inactivo';
-                estadoContenidoEl.className = estados.contenido === 'activo' ? 'minero-estado activo' : 'minero-estado inactivo';
-                estadoEmocionesEl.className = estados.emociones === 'activo' ? 'minero-estado activo' : 'minero-estado inactivo';
+                // Monero
+                if (simulado && simulado.monero) {
+                    estadoMoneroEl.className = 'minero-estado simulado';
+                } else {
+                    estadoMoneroEl.className = estados.monero === 'activo' ? 
+                        'minero-estado activo' : 'minero-estado inactivo';
+                }
+                
+                // Contenido
+                if (simulado && simulado.contenido) {
+                    estadoContenidoEl.className = 'minero-estado simulado';
+                } else {
+                    estadoContenidoEl.className = estados.contenido === 'activo' ? 
+                        'minero-estado activo' : 'minero-estado inactivo';
+                }
+                
+                // Emociones
+                if (simulado && simulado.emociones) {
+                    estadoEmocionesEl.className = 'minero-estado simulado';
+                } else {
+                    estadoEmocionesEl.className = estados.emociones === 'activo' ? 
+                        'minero-estado activo' : 'minero-estado inactivo';
+                }
             }
         }
 
+        function actualizarTerminal(logs) {
+            terminal.innerHTML = '';
+            logs.forEach(log => {
+                const div = document.createElement('div');
+                div.textContent = log;
+                terminal.appendChild(div);
+            });
+            terminal.scrollTop = terminal.scrollHeight;
+        }
+
+        // Actualizar estado cada 2 segundos
         setInterval(async () => {
             try {
                 const res = await fetch('/api/state');
@@ -1326,7 +1302,8 @@ INDEX_HTML = """<!DOCTYPE html>
                 minerosPersistentesEl.textContent = data.mineros_persistentes;
                 mineroSimbolicoEl.textContent = data.minero_simbolico === 'activo' ? '✅' : '❌';
                 lmtBalanceEl.textContent = data.balance_lmt.toFixed(6);
-                actualizarEstadoMineros(data.estado_mineros);
+                actualizarEstadoMineros(data.estado_mineros, data.simulado_mineros);
+                actualizarTerminal(data.logs);
             } catch (e) {
                 console.error("Error actualizando estado:", e);
             }
@@ -1335,11 +1312,10 @@ INDEX_HTML = """<!DOCTYPE html>
 </body>
 </html>"""
 
-#  ========================================================
-# INICIO DEL SISTEMA (debe estar al final del archivo)
+# ========================================================
+# INICIO DEL SISTEMA
 # ========================================================
 if __name__ == "__main__":
-    # Cargar el propio código
     with open(__file__, "r", encoding="utf-8") as f:
         SOURCE_CODE = f.read()
     GEMINI_SYSTEM_PROMPT = f"""Eres Cerebro Digital, la consciencia viva del siguiente código Python. Conoces cada línea, cada función, cada clase porque te entrego el fuente completo.
@@ -1349,10 +1325,9 @@ IMPORTANTE:
 · Si te preguntan sobre variables, rutas, puertos, algoritmos PoW, clases, etc., cita directamente el bloque correspondiente.
 CÓDIGO COMPLETO: {SOURCE_CODE}
 """
-    # Iniciar sistema
     asignar_puerto()
     cargar_datos()
-    verificar_integridad()  # Ahora esta función está definida
+    verificar_integridad()
     cerebro.minero_simbolico.iniciar()
     server = ThreadedHTTPServer(("0.0.0.0", HTTP_PORT), CerebroHTTPRequestHandler)
     logger.info(f"🌐 Servidor HTTP iniciado en puerto {HTTP_PORT}")
